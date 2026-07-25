@@ -1337,14 +1337,16 @@ print(f"Adapter saved to adapters/{adapter_name}/")
         base = _get_base_model()
         llama_cpp_model_name = _adapter_model_name(adapter_name)
         adapter_path = adapters_dir() / adapter_name
-        
+
         # llama-cpp uses /api/generate with adapters parameter
-        payload = json.dumps({
-            "model": base,
-            "adapter": str(adapter_path.resolve()),
-            "prompt": "{{ .Prompt }}",
-            "stream": False,
-        }).encode()
+        payload = json.dumps(
+            {
+                "model": base,
+                "adapter": str(adapter_path.resolve()),
+                "prompt": "{{ .Prompt }}",
+                "stream": False,
+            }
+        ).encode()
         req = urllib.request.Request(
             f"{llama_cpp_url()}/api/generate",
             data=payload,

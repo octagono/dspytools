@@ -6,7 +6,7 @@ Model Context Protocol (MCP) server and tools layer that exposes all dspytools f
 
 ## Ownership
 
-Owns the MCP transport layer — both server (accepting inbound agent connections) and client (connecting to external MCP tool servers like git-mcp). Four source files:
+Owns the MCP transport layer — both server (accepting inbound agent connections) and client (connecting to external MCP tool servers like git-mcp). Three source files:
 
 | File | Role |
 |------|------|

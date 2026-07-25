@@ -26,7 +26,7 @@ Each file owns its command group. No file-level cross-dependencies — commands 
 
 ### File index
 
-20 command files (alphabetical, 19 Click groups + 1 standalone command):
+24 command files (alphabetical, 24 Click groups):
 
 | File | Group | Scope |
 |------|-------|-------|
@@ -45,6 +45,7 @@ Each file owns its command group. No file-level cross-dependencies — commands 
 | `inspect.py` | `inspect` | Program inspection — load and display compiled program structure |
 | `lora.py` | `lora` | LoRA adapter management — load, unload, list, chat, test, health, discover, extract, evaluate (bootstrap p-value CI with auto drift registration), train |
 | `mcp.py` | `mcp` | MCP server management — start/stop/status of MCP tool servers |
+| `memory.py` | `memory` | FalkorDB-native persistent memory — add, search, get-all, delete subcommands |
 | `module.py` | `module` | DSPy module CRUD — new, list, show, call, delete |
 | `pipeline.py` | `pipeline` | Multi-module pipeline composition — compose, list, run subcommands |
 | `run.py` | `run` | Hot-swap inference runner — run compiled programs with live module reload |

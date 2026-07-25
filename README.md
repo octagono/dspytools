@@ -1,6 +1,6 @@
 # DSPyTools — Self-Evolving DSPy CLI
 
-**23 command groups · 110+ subcommands · 96 source files · 20+ optimizers · 11 arXiv paper implementations**
+**24 command groups · 110+ subcommands · 105 source files · 17+ optimizers · 11 arXiv paper implementations**
 
 ![Python](https://img.shields.io/badge/python-3.12+-blue)
 ![DSPy](https://img.shields.io/badge/dspy-3.3.0b1-green)
@@ -8,7 +8,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Ruff](https://img.shields.io/badge/ruff-zero--errors-brightgreen)
 ![Pyright](https://img.shields.io/badge/pyright-zero--errors-brightgreen)
-![Tests](https://img.shields.io/badge/tests-359%20pass-brightgreen)
+![Tests](https://img.shields.io/badge/tests-360-pass-brightgreen)
 
 A production-grade, self-evolving CLI for DSPy program management — featuring hot-swap inference,
 MCP agent interoperability, a Generative Feedback Loop (GFL) pipeline, skills system,
@@ -120,7 +120,7 @@ graph TD
 
 ## Features
 
-### 🚀 CLI — 23 Command Groups
+### 🚀 CLI — 24 Command Groups
 
 | Group | Subcommands | Description |
 |-------|-------------|-------------|
@@ -147,8 +147,9 @@ graph TD
 | `compare` | 1 | Side-by-side program comparison |
 | `doctor`  | 1 | System diagnostics, environment check, dependency audit |
 | `graph`   | 14 | Query, stats, skill-tree, lineage, migrate, redis, search, status, dependents, add-dependency, record-program, flush, benchmark, cascade |
+| `memory`  | 4  | FalkorDB-native persistent memory (add, search, get-all, delete) |
 
-### 🔧 20+ DSPy Optimizers
+### 🔧 17+ DSPy Optimizers
 
 | Optimizer | Type | Description |
 |-----------|------|-------------|
@@ -437,7 +438,7 @@ dspytools distill list-frameworks
 dspytools distill run --dry-run
 dspytools distill stats
 
-# 16. Stage files for Colab LoRA training
+# 14. Stage files for Colab LoRA training
 dspytools distill prepare-colab --adapter super --rank 64
 ```
 
@@ -789,20 +790,19 @@ dspytools/
 │   ├── evolve/ (8)             ← Self-evolve: engine, router, metrics + layers (action, contract, trajectory, __init__)
 │   ├── skills/ (5)             ← Skills: loader (BM25+embeddings), manager, discovery, __init__
 │   ├── generate/ (5)           ← llms.txt: cache, data, explorer, module, __init__
+│   ├── generators/ (3)         ← DSPy-native code generators (SignatureGeneratorDSPy, ModuleGeneratorDSPy)
 │   ├── graph/ (8)              ← FalkorDB: client, skill_graph, cache, migrate, redis_cache, benchmark, cache_mojo_bridge, __init__
 │   ├── memory/ (2)             ← FalkorDB-native: manager, __init__
 │   ├── help/ (4)               ← Self-optimizing help: module, context, optimize, __init__
 │   ├── api/ (1)                ← FastAPI hot-swap server
 │   ├── config/ (2)             ← Config: settings (hot-reload, env var overrides), env
 │   └── cli/ (3)                ← Rich output utilities (llm_help, output, rich_config)
-├── tests/ (23 files)           ← 350 smoke tests (zero LLM dependency)
+├── tests/ (24 files)           ← 360 smoke tests (zero LLM dependency)
 ├── docker-compose.redis.yml    ← Redis Stack + FalkorDB container
 ├── AGENTS.md                   ← DOX framework root
 ├── pyproject.toml              ← UV project + pyright + pytest config
 ├── .env.example                ← All configurable env vars documented
 └── .env                        ← API keys + runtime config
-```
-
 ```
 
 ### Code Quality
@@ -832,7 +832,7 @@ All tests are **smoke tests** — they verify structure, registration, and impor
 
 ### DOX Documentation Tree
 
-12 child `AGENTS.md` files plus root:
+13 child `AGENTS.md` files plus root (including `generators/`):
 
 ```
 AGENTS.md (root)
@@ -843,6 +843,7 @@ AGENTS.md (root)
 ├── src/dspytools/evolve/AGENTS.md
 ├── src/dspytools/skills/AGENTS.md
 ├── src/dspytools/generate/AGENTS.md
+├── src/dspytools/generators/AGENTS.md
 ├── src/dspytools/graph/AGENTS.md
 ├── src/dspytools/memory/AGENTS.md
 ├── src/dspytools/help/AGENTS.md

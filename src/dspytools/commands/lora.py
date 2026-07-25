@@ -33,13 +33,17 @@ from dspytools.core.loaders import join_inputs
 
 # ── llama-cpp-server API helpers ───────────────────────────────────────────────────
 
+
 def _llama_api_post(path: str, payload: dict) -> dict:
     """POST to llama-cpp-server API and return JSON response."""
     url = f"{llama_cpp_url()}{path}"
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}
+    )
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read().decode())
+
 
 def _llama_api_get(path: str) -> dict:
     """GET from llama-cpp-server API and return JSON response."""
@@ -47,14 +51,18 @@ def _llama_api_get(path: str) -> dict:
     with urllib.request.urlopen(url, timeout=10) as resp:
         return json.loads(resp.read().decode())
 
+
 def _llama_api_delete(path: str, payload: dict) -> dict:
     """DELETE to llama-cpp-server API and return JSON response."""
     url = f"{llama_cpp_url()}{path}"
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}
+    )
     req.get_method = lambda: "DELETE"
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read().decode())
+
 
 def _llama_chat(model: str, message: str, max_tokens: int = 1000) -> str:
     """Send a chat request to llama-cpp-server native API."""
@@ -172,7 +180,9 @@ def lora_load(name: str, path: str, base: str):
     info(f"  Name: {model_name}")
     info("")
     info("Restart llama-server with:")
-    info(f"  llama-server --hf-repo unsloth/Qwen3.5-9B-GGUF --hf-file Qwen3.5-9B-UD-Q4_K_XL.gguf --lora {resolved} --host 127.0.0.1 --port 8080")
+    info(
+        f"  llama-server --hf-repo unsloth/Qwen3.5-9B-GGUF --hf-file Qwen3.5-9B-UD-Q4_K_XL.gguf --lora {resolved} --host 127.0.0.1 --port 8080"
+    )
     ok(f"LoRA adapter '{name}' prepared. Load by restarting server with --lora flag.")
     info(f"After loading, run: dspytools lora chat {name}")
 
@@ -190,6 +200,7 @@ def lora_unload(name: str):
 
     # llama-cpp-server doesn't have /api/delete - use system command to unload
     ok(f"LoRA model '{model_name}' unloaded via system command.")
+
 
 @lora_cmd.command(name="chat", cls=LLMCommand)
 @click.argument("name")
@@ -210,6 +221,8 @@ def lora_chat(name: str, message: str):
     console.print(f"[bold]Chat with LoRA model:[/] {model_name}\n")
     response = _llama_chat(model_name, message)
     console.print(response)
+
+
 def lora_test(name: str, prompt: str):
     """Quick test a LoRA-derived model with a code generation prompt via llama-cpp-server."""
     model_name = name if "-lora-" in name else _adapter_model_name(name)

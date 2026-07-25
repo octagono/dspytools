@@ -19,7 +19,6 @@ venv/
 *.safetensors
 *.bin
 *.pt
-*.gguf
 generated_llms.txt
 generated_llms_mcp.txt
 analyzer_state.json

@@ -116,6 +116,12 @@ ignore_errors = true
 module = "tests.*"
 ignore_errors = true
 
+[project.optional-dependencies]
+dev = [
+    "pyright>=1.1.411",
+    "vcrpy>=6.0.1",
+]
+
 [dependency-groups]
 dev = [
     "pyright>=1.1.411",

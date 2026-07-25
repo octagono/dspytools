@@ -35,33 +35,17 @@ jobs:
       - name: Install build tools
         run: pip install build hatchling
 
-      # Try to compile Mojo modules (optional — falls back to Python)
-      # Mojo SDK version is pinned for reproducible binary compatibility.
-      # Update MOJO_VERSION when upgrading — mismatched versions cause segfaults at runtime.
+      # Mojo modules are optional — wheel falls back to Python fallback.
+      # Self-hosted runners with Mojo SDK handle actual compilation.
       - name: Compile Mojo modules (if SDK available)
         continue-on-error: true
-        env:
-          MOJO_VERSION: "1.0.0b2"
         run: |
-          # Try pip-installed Mojo first (fastest)
-          if python -c "import mojo" 2>/dev/null; then
-            echo "Mojo Python package available"
-          elif command -v pixi &>/dev/null; then
-            pixi add "modular/max=${MOJO_VERSION}"
-          else
-            curl -LsSf https://pixi.sh/install.sh | sh
-            export PATH="$HOME/.pixi/bin:$PATH"
-            pixi init && pixi add "modular/max=${MOJO_VERSION}"
-          fi
-
-          if command -v mojo &>/dev/null || python -c "import mojo" 2>/dev/null; then
-            cd mojo_modules && ./build.sh
-            echo "MOJO_BUILT=true" >> $GITHUB_ENV
-            echo "Mojo modules compiled successfully"
-          else
-            echo "Mojo SDK not available — wheel will use Python fallback"
-            echo "MOJO_BUILT=false" >> $GITHUB_ENV
-          fi
+          # Mojo SDK is optional — wheel falls back to Python fallback.
+          # pixi-based Mojo installation is unreliable in CI (pixi.sh rate limits,
+          # modular registry access restrictions). Skip Mojo compilation entirely
+          # in cloud CI; self-hosted runners handle Mojo builds.
+          echo "Mojo SDK not available — wheel will use Python fallback"
+          echo "MOJO_BUILT=false" >> $GITHUB_ENV
 
       - name: Build wheel
         run: python -m build --wheel

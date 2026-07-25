@@ -63,10 +63,11 @@ When the user requests a durable behavior change, record it here or in the relev
 
 ```
 dspytools/
-├── commands/  → CLI subcommands (compile, generate, skills, pipeline, export, ...)
-├── core/       → Engine (hotswap, LMRegistry, registry, scheduler, MLflow, mojo_bridge, sprt_mojo_bridge, errors)
+├── commands/  → CLI subcommands (compile, generate, skills, pipeline, export, memory, graph, ...)
+├── core/       → Engine (hotswap, LMRegistry, registry, scheduler, MLflow, holdout, retry, drift_monitor, mojo_bridge, errors)
 ├── gfl/       → Generative Feedback Loop + paper optimizers
 ├── generate/  → llms.txt generation + sandbox pool
+├── generators/ → DSPy-native code generators (SignatureGeneratorDSPy, ModuleGeneratorDSPy)
 ├── evolve/    → Self-evolving agent system + harness layers
 ├── graph/     → FalkorDB graph database + RedisVL semantic cache, cache_mojo_bridge, benchmark
 ├── memory/    → FalkorDB-native persistent memory layer
@@ -92,18 +93,19 @@ dspytools/
 | MLflow setup | `dspytools/core/mlflow_tracker.py` docstrings |
 | One-command dev | `docs/dev-local.md` |
 | Verify before ship | `scripts/verify.sh` |
-| DOX tree | 12 child AGENTS.md in `src/dspytools/*/` |
+| DOX tree | 13 child AGENTS.md in `src/dspytools/*/` |
 
 ## Child DOX Index
 
-Root governs the dspytools project — DSPy 3.3.0b1 examples running on Qwen3.5-9B via llama-cpp-server with MCP-git agentic tools. Twelve child AGENTS.md files in `src/dspytools/*/`:
+Root governs the dspytools project — DSPy 3.3.0b1 examples running on Qwen3.5-9B via llama-cpp-server with MCP-git agentic tools. Thirteen child AGENTS.md files in `src/dspytools/*/`:
 
 | Directory | Scope |
 |-----------|-------|
-| `commands/` | 23 CLI commands (22 groups + 1 standalone, 110+ subcommands) |
-| `core/` | Engine: hotswap, LMRegistry, registry, scheduler, output, _dspy, _io, mlflow_tracker, loaders, metrics, cost_tracker, drift_monitor, holdout, retry, mojo_bridge, errors, logging_config |
+| `commands/` | 24 CLI commands (24 groups) |
+| `core/` | Engine: hotswap, LMRegistry, registry, scheduler, MLflow, holdout, retry, cost_tracker, drift_monitor, loaders, metrics, output, _dspy, _io, _embedder, dspy_modules, errors, logging_config |
 | `mcp/` | Unified MCP server, 65 tool handlers (all merged into BUILTIN_TOOLS), session pool |
 | `generate/` | llms.txt generation: RepositoryAnalyzer, SandboxPool, quality scoring |
+| `generators/` | DSPy-native code generators: SignatureGeneratorDSPy, ModuleGeneratorDSPy (compilable ChainOfThought modules) |
 | `gfl/` | GFL pipeline (4-way, Successive Halving, Speculative Compile), 8 paper optimizers, ChallengerSolver, Trace2Skill |
 | `evolve/` | SelfEvolveEngine (SPRT, Meta Agent Search), RouterAgent (ReAct), 3 harness layers |
 | `graph/` | FalkorDB: client, skill_graph, cache, migrate (O(1) graph traversal, semantic cache) |
@@ -119,7 +121,7 @@ Root governs the dspytools project — DSPy 3.3.0b1 examples running on Qwen3.5-
 pytest tests/ -q              # 360 smoke tests, 5s (no LLM needed)
 ruff check                     # zero errors required
 dspytools --help               # explore all 24 commands (0.18s cold start)
-dspytools auto-fix             # inspect and fix drift-degraded programs
+dspytools self auto-fix         # inspect and fix drift-degraded programs
 ./scripts/ci-local.sh          # full 5-stage CI pipeline on local GPU
 ./scripts/ci-local.sh --stage 1  # lint + smoke tests only
 ```

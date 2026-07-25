@@ -32,7 +32,7 @@ jobs:
         run: ruff format --check src/ tests/
 
   smoke-tests:
-    name: Smoke Tests (359, zero-LLM)
+    name: Smoke Tests (360, zero-LLM)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
