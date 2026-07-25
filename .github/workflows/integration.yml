@@ -1,0 +1,103 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  falkordb-integration:
+    name: FalkorDB + Redis Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      redis:
+        image: falkordb/falkordb:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 3
+        env:
+          REDIS_ARGS: "--appendonly yes --maxmemory 512mb"
+
+    env:
+      FALKORDB_HOST: localhost
+      FALKORDB_PORT: "6379"
+      DSPYTOOLS_EMBEDDING_DIM: "768"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dspytools
+        run: pip install -e ".[dev]"
+
+      - name: Verify FalkorDB reachable
+        run: |
+          sleep 3
+          redis-cli -h localhost -p 6379 ping || exit 1
+
+      - name: Run integration tests
+        run: |
+          pytest tests/test_graph_commands.py \
+                 tests/test_memory_manager.py \
+                 tests/test_semantic_cache.py \
+                 tests/test_skill_graph.py \
+                 -v --tb=short
+
+      - name: Graph smoke tests
+        run: |
+          dspytools graph status
+          dspytools graph query "MATCH (n) RETURN count(n) LIMIT 5"
+          dspytools graph stats
+
+      - name: Memory smoke tests
+        run: |
+          dspytools memory stats
+          dspytools memory list
+
+  graph-migration:
+    name: Graph Migration Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    services:
+      redis:
+        image: falkordb/falkordb:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dspytools
+        run: pip install -e ".[dev]"
+
+      - name: Run graph migration
+        run: |
+          dspytools graph migrate --target all || true
+
+      - name: Verify migration
+        run: |
+          dspytools graph skill-tree
+          dspytools graph stats

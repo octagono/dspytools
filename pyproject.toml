@@ -1,0 +1,123 @@
+[project]
+name = "dspytools"
+version = "0.1.0"
+description = "DSPy CLI — signatures, modules, MCP agents, optimizers, hot-swap inference"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pre-commit>=4.0.0",
+    "click>=8.0",
+    "dspy @ git+https://github.com/stanfordnlp/dspy.git@80fce4cc1c6707d1fa14d2ad3559027d33d46bc7",
+    "fastapi>=0.139.0",
+    "jinja2>=3.1.6",
+    "mcp>=1.28.1",
+    "mlflow[mcp]>=3.5.1",
+    "numpy>=2.5.0",
+    "pydantic>=2.14.0a1",
+    "pytest>=9.1.1",
+    "rich>=13.0.0",
+    "starlette>=1.3.1",
+    "toml>=0.10.2",
+    "uvicorn>=0.50.0",
+    "ruff>=0.15.20",
+    # Graph + Cache (FalkorDB + Redis)
+    "falkordb>=1.0.0",
+    "redis>=5.0.0",
+    "redisvl>=0.5.0",
+    "rich-click>=1.9.8",
+    "optuna>=4.9.0",
+    "datasets>=5.0.0",
+    "structlog>=26.1.0",
+]
+
+[project.scripts]
+dspytools = "dspytools.main:cli"
+
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dspytools"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel.force-include]
+# Mojo compiled shared libraries are included when present.
+# When absent (no Mojo SDK), the build still succeeds — Python fallback active.
+"mojo_modules" = "dspytools/mojo_modules"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/dspytools",
+    "tests",
+    "docs",
+    "mojo_modules",
+    "scripts",
+    "data/golden_eval.jsonl",
+    "data/golden_baseline.json",
+    "README.md",
+    "LICENSE",
+]
+
+[tool.ruff]
+src = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = [
+    "ignore:There is no current event loop:DeprecationWarning",
+]
+
+
+[tool.mypy]
+python_version = "3.12"
+strict = false
+warn_return_any = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = "dspy.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "falkordb.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "redis.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "click.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "mlflow.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "mojo.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "numpy.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.411",
+    "vcrpy>=6.0.1",
+]

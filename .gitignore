@@ -1,0 +1,94 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+*.egg
+# Virtual environments
+.venv/
+venv/
+.env
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+# DSPy / LLM artifacts
+*.safetensors
+*.bin
+*.pt
+*.gguf
+generated_llms.txt
+generated_llms_mcp.txt
+analyzer_state.json
+compiled_*.json
+generated_outputs/
+compiled/*.json
+compiled/registry.db
+compiled/*/
+synthetic*.json
+
+# Compiled runs (keep structure, ignore contents)
+compiled/*/
+
+# Generated export files
+export_*.zip
+
+# Runtime files
+.bge.log
+.bge.pid
+# Generated artifact directories (user-created modules, skills, signatures, agents)
+# These are gitignored but part of the project structure
+# Root-anchored to avoid matching src/dspytools/<pkg>/
+/modules/
+/skills/
+/signatures/
+/agents/
+
+# Training data and extraction output
+data/
+output/
+
+# Evaluation scripts
+eval/
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated data files
+docs-summary.txt
+dspytools_trainset.json
+qa_synthetic.json
+# Pyright
+.pyrightcache/
+# MLflow / Experiment tracking
+mlflow.db
+mlruns/
+
+# OpenCode IDE config
+.opencode/node_modules/
+.opencode/rag_db/
+.opencode/opencode-rag.log
+.opencode/package.json
+.opencode/package-lock.json
+
+# Runtime artifacts
+.mlflow.log
+.mlflow.pid
+.envsitter/
+
+# Mojo auto-compile cache
+__mojocache__/
+
+# Mojo compiled shared objects (build artifacts, rebuilt by CI)
+mojo_modules/*.so
+
+# Local project config
+.dspytools/config.toml
+
+# CI local logs
+.ci-logs/
+mlartifacts/
+*.gguf

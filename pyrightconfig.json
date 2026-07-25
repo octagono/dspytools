@@ -1,0 +1,14 @@
+{
+  "include": ["src", "tests"],
+  "exclude": ["output", ".venv", "__pycache__", "__mojocache__"],
+  "typeCheckingMode": "standard",
+  "reportCallIssue": false,
+  "reportArgumentType": false,
+  "reportAttributeAccessIssue": false,
+  "reportUnknownMemberType": false,
+  "reportInvalidTypeForm": false,
+  "reportOptionalCall": false,
+  "reportOptionalSubscript": false,
+  "reportOptionalMemberAccess": false,
+  "reportOptionalIterable": false
+}

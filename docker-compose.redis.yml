@@ -1,0 +1,41 @@
+# FalkorDB + Redis for dspytools
+#
+# Services:
+#   - redis: FalkorDB (graph) + Redis (vector search, caching)
+#
+# Ports:
+#   - 6379: FalkorDB + Redis
+#
+# Usage:
+#   docker compose -f docker-compose.redis.yml up -d
+#   docker compose -f docker-compose.redis.yml down
+#
+# Health check:
+#   docker exec dspytools-redis redis-cli ping
+
+services:
+  redis:
+    image: falkordb/falkordb:latest
+    container_name: dspytools-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    environment:
+      - REDIS_ARGS=--appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - dspytools-net
+
+volumes:
+  redis-data:
+
+networks:
+  dspytools-net:
+    driver: bridge

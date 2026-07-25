@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint + Format Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff==0.11.0
+
+      - name: Ruff check
+        run: ruff check src/ tests/
+
+      - name: Ruff format check
+        run: ruff format --check src/ tests/
+
+  smoke-tests:
+    name: Smoke Tests (359, zero-LLM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dspytools
+        run: pip install -e ".[dev]"
+
+      - name: Run pytest
+        run: pytest tests/ -q --tb=short
+
+      - name: Import check
+        run: |
+          python -c "
+          from dspytools.core._dspy import dspy
+          from dspytools.gfl.pipeline import GFLPipeline
+          from dspytools.mcp.tools import BUILTIN_TOOLS
+          from dspytools.skills import SkillManager
+          print(f'{len(BUILTIN_TOOLS)} MCP tools loaded')
+          "
+
+      - name: CLI smoke test
+        run: |
+          dspytools --help
+          dspytools doctor --check-llm false --check-gpu false

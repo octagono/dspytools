@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build-wheels:
+    name: Build Wheel (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: self-hosted
+            platform: linux_x86_64
+            label: self-hosted
+          - os: ubuntu-latest
+            platform: linux_x86_64
+            label: cloud
+          - os: macos-14
+            platform: macosx_arm64
+            label: cloud
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    if: ${{ matrix.label != 'self-hosted' || vars.ENABLE_SELF_HOSTED_RELEASE == 'true' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build hatchling
+
+      # Try to compile Mojo modules (optional — falls back to Python)
+      # Mojo SDK version is pinned for reproducible binary compatibility.
+      # Update MOJO_VERSION when upgrading — mismatched versions cause segfaults at runtime.
+      - name: Compile Mojo modules (if SDK available)
+        continue-on-error: true
+        env:
+          MOJO_VERSION: "1.0.0b2"
+        run: |
+          # Try pip-installed Mojo first (fastest)
+          if python -c "import mojo" 2>/dev/null; then
+            echo "Mojo Python package available"
+          elif command -v pixi &>/dev/null; then
+            pixi add "modular/max=${MOJO_VERSION}"
+          else
+            curl -LsSf https://pixi.sh/install.sh | sh
+            export PATH="$HOME/.pixi/bin:$PATH"
+            pixi init && pixi add "modular/max=${MOJO_VERSION}"
+          fi
+
+          if command -v mojo &>/dev/null || python -c "import mojo" 2>/dev/null; then
+            cd mojo_modules && ./build.sh
+            echo "MOJO_BUILT=true" >> $GITHUB_ENV
+            echo "Mojo modules compiled successfully"
+          else
+            echo "Mojo SDK not available — wheel will use Python fallback"
+            echo "MOJO_BUILT=false" >> $GITHUB_ENV
+          fi
+
+      - name: Build wheel
+        run: python -m build --wheel
+
+      - name: Verify wheel contents
+        run: |
+          python -c "
+          import zipfile, glob
+          wheels = glob.glob('dist/*.whl')
+          assert wheels, 'No wheel produced'
+          w = wheels[0]
+          print(f'Wheel: {w}')
+          with zipfile.ZipFile(w) as z:
+            names = z.namelist()
+            print(f'  {len(names)} files')
+            mojo = [n for n in names if '.so' in n or '.dylib' in n or 'mojo_modules' in n]
+            if mojo:
+              print(f'  Mojo binaries: {mojo}')
+            else:
+              print('  No Mojo binaries (Python fallback)')
+          "
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform }}-${{ matrix.label }}
+          path: dist/*.whl
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    # Only publish from cloud builds (not self-hosted, which may lack PyPI creds)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*cloud*
+          merge-artifacts: true
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true

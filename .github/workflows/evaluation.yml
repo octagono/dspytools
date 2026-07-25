@@ -1,0 +1,136 @@
+name: Evaluation Gate
+
+on:
+  schedule:
+    # Nightly at 02:00 UTC
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: evaluation
+  cancel-in-progress: false
+
+jobs:
+  sprt-evaluation:
+    name: GFL Pipeline + SPRT Regression Gate
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 60
+
+    # Security: never run on forked PRs — self-hosted runners execute on internal GPU.
+    # Current triggers are schedule + workflow_dispatch only (no push or pull_request),
+    # so this guard is defensive against future trigger additions.
+    if: |
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+
+    env:
+      OLLAMA_HOST: http://localhost:11434
+      FALKORDB_HOST: localhost
+      FALKORDB_PORT: "6379"
+      MLFLOW_TRACKING_URI: http://localhost:5000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dspytools
+        run: pip install -e ".[dev]"
+
+      - name: Verify GPU + Ollama + FalkorDB
+        run: |
+          echo "=== GPU ==="
+          nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader || echo "no GPU"
+          echo "=== Ollama ==="
+          curl -sf http://localhost:11434/api/tags | python3 -m json.tool | head -5
+          echo "=== FalkorDB ==="
+          redis-cli -h localhost -p 6379 ping
+          echo "=== MLflow ==="
+          curl -sf http://localhost:5000/health || echo "MLflow not reachable (non-blocking)"
+
+      - name: Evaluate baseline quality
+        id: baseline
+        run: |
+          python3 << 'EOF'
+          import subprocess, json, re, sys
+
+          # Run evaluation on golden dataset
+          result = subprocess.run(
+              ["dspytools", "evaluate", "run", "simpleqa", "data/golden_eval.jsonl",
+               "--metric", "exact_match"],
+              capture_output=True, text=True
+          )
+          output = result.stdout + result.stderr
+
+          # Extract score percentage
+          match = re.search(r'Score:\s+([0-9.]+)%', output)
+          if not match:
+              print("Could not parse score from output")
+              print(output[-500:])
+              sys.exit(1)
+
+          score = float(match.group(1))
+          print(f"Current score: {score:.1f}%")
+
+          # Load baseline
+          from pathlib import Path
+          baseline_file = Path("data/golden_baseline.json")
+          baseline = 0.0
+          if baseline_file.exists():
+              baseline = json.loads(baseline_file.read_text()).get("score", 0.0)
+
+          print(f"Baseline score: {baseline:.1f}%")
+
+          # Regression check: current must be >= 90% of baseline
+          min_acceptable = baseline * 0.9
+          print(f"Minimum acceptable: {min_acceptable:.1f}%")
+
+          if score < min_acceptable:
+              print(f"::error::REGRESSION DETECTED: {score:.1f}% < {min_acceptable:.1f}%")
+              sys.exit(1)
+
+          print(f"::notice::Quality gate PASSED: {score:.1f}% >= {min_acceptable:.1f}%")
+
+          # Update baseline if improved
+          if score > baseline:
+              baseline_file.write_text(json.dumps({"score": score}, indent=2))
+              print(f"Baseline updated to {score:.1f}%")
+
+          # Set output for downstream steps
+          print(f"score={score}" >> "$GITHUB_OUTPUT")
+          EOF
+
+      - name: Run GFL halving compile (optional optimization)
+        if: success()
+        run: |
+          dspytools compile gfl simpleqa data/golden_eval.jsonl \
+            --label ci-eval-$(date +%Y%m%d) \
+            --halving || echo "GFL compile failed (non-blocking)"
+
+      - name: Commit updated baseline
+        # Job-level if guard already blocks fork PRs.
+        #[skip ci] prevents recursive workflow trigger.
+        run: |
+          if git diff --quiet data/golden_baseline.json; then
+            echo "No baseline change — skipping commit"
+          else
+            git config user.name "CI Evaluation Bot"
+            git config user.email "ci-bot@dspytools.local"
+            git add data/golden_baseline.json
+            git commit -m "chore(eval): update golden baseline [skip ci]
+
+            Auto-updated by evaluation.yml workflow_run ${{ github.run_id }}"
+            git push || echo "Push failed (may lack write permission — non-blocking)"
+          fi
+
+      - name: Upload evaluation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-results
+          path: |
+            data/golden_baseline.json
+            .ci-logs/
+          retention-days: 30

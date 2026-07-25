@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Convenience wrapper — runs dspytools CLI without install.
+# Usage: ./scripts/dspytools doctor
+#        ./scripts/dspytools compile --help
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="${DIR}/src"
+exec "${DIR}/.venv/bin/python" -c "from dspytools.main import cli; cli()" "$@"
