@@ -43,11 +43,11 @@ def test_compile_cost_summary():
 
 
 def test_local_model_cost_zero():
-    usage = TokenUsage.estimate("Qwen/Qwen2.5-Coder-3B-Instruct-AWQ", 1000000, 1000000)
+    usage = TokenUsage.estimate("unsloth/Qwen3.5-9B-GGUF", 1000000, 1000000)
     assert usage.cost_estimate == 0.0
 
 
 def test_pricing_contains_expected_keys():
     assert "deepseek/deepseek-v4-flash" in PRICING
-    assert "Qwen/Qwen2.5-Coder-3B-Instruct-AWQ" in PRICING
+    assert "unsloth/Qwen3.5-9B-GGUF" in PRICING
     assert "default" in PRICING

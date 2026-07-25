@@ -32,7 +32,7 @@ jobs:
         run: ruff format --check src/ tests/
 
   smoke-tests:
-    name: Smoke Tests (360, zero-LLM)
+    name: Smoke Tests (no LLM, no Redis)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -46,7 +46,7 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run pytest
-        run: pytest tests/ -q --tb=short
+        run: pytest tests/ -q --tb=short --ignore=tests/test_cascade_propagation.py --ignore=tests/test_convergence.py --ignore=tests/test_gfl_pipeline.py --ignore=tests/test_hotswap.py --ignore=tests/test_meta_agent_learning.py --ignore=tests/test_pipeline_commands.py
 
       - name: Import check
         run: |
