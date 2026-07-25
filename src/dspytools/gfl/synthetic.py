@@ -25,7 +25,6 @@ class DataSynthesizer:
     """
 
     def __init__(self, teacher_model: str | None = None):
-
         self.lm = LMRegistry.get_teacher() or LMRegistry.get_or_default()
 
     def generate(

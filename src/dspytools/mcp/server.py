@@ -200,7 +200,6 @@ def create_mcp_server() -> Any:
 
     @server.list_resources()
     async def handle_list_resources():
-
         runs = list_compiled_runs()
         resources = []
         for run in runs:
@@ -260,7 +259,6 @@ def create_mcp_server() -> Any:
 
     @server.read_resource()
     async def handle_read_resource(uri: str):
-
         uri_str = str(uri)  # MCP SDK may pass AnyUrl object, ensure string
 
         if uri_str == "dspytools://programs":
@@ -326,7 +324,6 @@ def create_mcp_server() -> Any:
 
 
 def run_stdio() -> None:
-
     server = create_mcp_server()
 
     async def _run():
@@ -341,7 +338,6 @@ def run_stdio() -> None:
 
 
 def run_sse(host: str = "0.0.0.0", port: int = 8002) -> None:
-
     server = create_mcp_server()
     sse = SseServerTransport("/mcp/messages")
 

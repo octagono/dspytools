@@ -17,7 +17,6 @@ class TaskDecomposer:
     """
 
     def __init__(self):
-
         self.teacher = LMRegistry.get_teacher() or LMRegistry.get_or_default()
 
     def decompose(self, task_description: str) -> dict:

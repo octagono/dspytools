@@ -167,7 +167,6 @@ class RouterAgent:
     """
 
     def __init__(self, max_iters: int = 10):
-
         setup_dspy()
         setup_agent_tracing()
         tools = _build_router_tools()

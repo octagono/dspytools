@@ -82,19 +82,16 @@ def doctor_cmd(check_llm: bool, check_gpu: bool, check_config: bool):
     )
 
     def _check_dspy():
-
         return f"dspy {dspy.__version__}"
 
     check("DSPy import", lambda: _check_dspy() and True)
 
     def _check_click():
-
         return f"click {version('click')}"
 
     check("Click import", lambda: _check_click() and True)
 
     def _check_mlflow():
-
         return f"mlflow {mlflow.__version__}"
 
     warn_check("MLflow", lambda: _check_mlflow())
@@ -184,14 +181,12 @@ def doctor_cmd(check_llm: bool, check_gpu: bool, check_config: bool):
     console.print("\n[bold]Registry:[/]")
 
     def _check_registry():
-
         runs = list_compiled_runs()
         return f"{len(runs)} compiled programs"
 
     check("Registry", _check_registry)
 
     def _check_index():
-
         index = compiled_dir() / "index.json"
         if index.exists():
             return f"{index.stat().st_size} bytes"
@@ -203,14 +198,12 @@ def doctor_cmd(check_llm: bool, check_gpu: bool, check_config: bool):
     console.print("\n[bold]LM Configuration:[/]")
 
     def _check_student_lm():
-
         student = LMRegistry.get_or_default()
         return f"student LM: {student.model if hasattr(student, 'model') else 'configured'}"
 
     warn_check("Student LM", _check_student_lm)
 
     def _check_teacher_lm():
-
         teacher = LMRegistry.get_teacher()
         if teacher:
             return f"teacher LM: {teacher.model if hasattr(teacher, 'model') else 'configured'}"

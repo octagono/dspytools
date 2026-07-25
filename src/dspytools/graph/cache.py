@@ -47,7 +47,6 @@ class SemanticCache:
         distance_threshold: float = 0.15,
         model_name: str | None = None,
     ) -> None:
-
         self._name = name
         self._ttl = ttl_seconds
         self._model_name = model_name

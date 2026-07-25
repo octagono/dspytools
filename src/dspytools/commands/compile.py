@@ -81,7 +81,6 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
         force: bool = False,
         draft: bool = False,
     ):
-
         setup_dspy()
         student = load_module_by_name(module_name)
         trainset = load_trainset(trainset_path)

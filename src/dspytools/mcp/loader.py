@@ -136,7 +136,6 @@ class MCPSessionPool:
         loop = cls._get_loop()
 
         async def _connect() -> list[dspy.Tool]:
-
             all_tools: list[dspy.Tool] = []
 
             for name, server_cfg in servers.items():

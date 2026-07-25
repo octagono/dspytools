@@ -297,7 +297,6 @@ class DriftMonitor:
         return results
 
     def _load_state(self) -> None:
-
         path = Path(self.state_file)
         if not path.exists():
             return
@@ -318,7 +317,6 @@ class DriftMonitor:
             ]
 
     def _save_state(self) -> None:
-
         write_json(
             self.state_file,
             {
