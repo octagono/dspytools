@@ -61,4 +61,4 @@ jobs:
       - name: CLI smoke test
         run: |
           dspytools --help
-          dspytools doctor --check-llm false --check-gpu false
+          dspytools doctor --no-llm --no-gpu
