@@ -1,3 +1,5 @@
+<img src="image/img.png" alt="DSPyTools" width="100%">
+
 # DSPyTools — Self-Evolving DSPy CLI
 
 **24 command groups · 110+ subcommands · 105 source files · 17+ optimizers · 11 arXiv paper implementations**
