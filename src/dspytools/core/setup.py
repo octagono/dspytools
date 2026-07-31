@@ -307,6 +307,96 @@ def setup_dspy(
             return _orig_render(annotation, depth, indent, seen_models)
 
         _baml_mod._render_type_str = _patched_render
+
+        # DeepSeek response_format fix: JSONAdapter.__call__ (which BAMLAdapter
+        # inherits) sets lm_kwargs["response_format"] to a Pydantic model or
+        # {"type": "json_object"} and passes it to the LM.  DeepSeek rejects
+        # this with "This response_format type is unavailable now" on some
+        # API key tiers.  The LMError propagates up through ChatAdapter and
+        # kills the call.  Fix: patch JSONAdapter.__call__ to catch LMError
+        # where response_format was set, strip it, and retry via the plain
+        # ChatAdapter path (text-based parsing, no structured output).
+        from dspy.adapters.json_adapter import JSONAdapter as _JSONAdapter
+        from dspy.utils.exceptions import LMError
+
+        _orig_json_call = _JSONAdapter.__call__
+
+        def _patched_json_call(self, lm, lm_kwargs, signature, demos, inputs):
+            try:
+                return _orig_json_call(self, lm, lm_kwargs, signature, demos, inputs)
+            except LMError:
+                # If response_format was set and the LM rejected it, retry
+                # without it using the ChatAdapter text-parsing path.
+                if lm_kwargs.get("response_format") is not None:
+                    lm_kwargs_copy = dict(lm_kwargs)
+                    lm_kwargs_copy.pop("response_format", None)
+                    return super(_JSONAdapter, self).__call__(
+                        lm, lm_kwargs_copy, signature, demos, inputs
+                    )
+                raise
+
+        _JSONAdapter.__call__ = _patched_json_call
+
+        # ReActV2 + Reasoning-field fix: ReActV2's react signature has output
+        # fields [next_thought (dspy.Reasoning), tool_calls (dspy.ToolCalls)].
+        # With native function calling, the provider returns tool_calls in the
+        # API response and reasoning in reasoning_content — the JSON body the
+        # model emits contains tool_calls but often omits next_thought.
+        # JSONAdapter.parse() strict-requires every output field key, so the
+        # parse fails and ReActV2's tool loop dies before executing tools.
+        # Fix: patch JSONAdapter.parse() to treat missing dspy.Reasoning-typed
+        # output fields as optional (they are filled from reasoning_content or
+        # defaulted to None in _call_postprocess). Non-Reasoning missing fields
+        # still raise.
+        def _parse_with_reasoning_tolerance(self, signature, completion):
+            import json_repair as _json_repair
+            import regex as _regex
+            from dspy.adapters.types.reasoning import Reasoning
+            from dspy.adapters.utils import parse_value
+            from dspy.utils.exceptions import AdapterParseError
+
+            parsed = _json_repair.loads(completion)
+            if not isinstance(parsed, dict):
+                _pattern = r"\{(?:[^{}]|(?R))*\}"
+                _m = _regex.search(_pattern, completion, _regex.DOTALL)
+                if _m:
+                    parsed = _json_repair.loads(_m.group(0))
+            if not isinstance(parsed, dict):
+                raise AdapterParseError(
+                    adapter_name="JSONAdapter",
+                    signature=signature,
+                    lm_response=completion,
+                    message="LM response cannot be serialized to a JSON object.",
+                )
+
+            parsed = {k: v for k, v in parsed.items() if k in signature.output_fields}
+            for k, v in parsed.items():
+                if k in signature.output_fields:
+                    parsed[k] = parse_value(v, signature.output_fields[k].annotation)
+
+            # Reasoning fields may be absent — populated from reasoning_content
+            # or defaulted in _call_postprocess. Other fields must all be present.
+            required = {
+                k
+                for k in signature.output_fields
+                if signature.output_fields[k].annotation is not Reasoning
+            }
+            if required and not required.issubset(set(parsed.keys())):
+                raise AdapterParseError(
+                    adapter_name="JSONAdapter",
+                    signature=signature,
+                    lm_response=completion,
+                    parsed_result=parsed,
+                )
+            return parsed
+
+        _JSONAdapter.parse = _parse_with_reasoning_tolerance
+
+        # BAMLAdapter overrides parse() with its own strict key check — patch it
+        # the same way so ReActV2's Reasoning fields are tolerated there too.
+        from dspy.adapters.baml_adapter import BAMLAdapter as _BAMLAdapter2
+
+        _BAMLAdapter2.parse = _parse_with_reasoning_tolerance
         _baml_patched = True
 
     # Read configured adapter from config, default to BAMLAdapter

@@ -470,29 +470,43 @@ class GFLPipeline:
         metric = exact_match_metric()
         # GEPA requires a 5-arg metric: (gold, pred, trace, pred_name, pred_trace)
         gepa_met = gepa_metric
+        # The teacher LM (DeepSeek) generates the demonstrations that train the
+        # student. Without it, optimizers bootstrap with the student-as-teacher,
+        # which fails for tool-use/ReAct tasks the student can't do yet.
+        #
+        # DSPy 3.3.0b1: BootstrapFewShot.compile()/MIPROv2.compile() expect a
+        # teacher MODULE (must have .deepcopy()), not a raw dspy.LM. Build the
+        # teacher module by copying the student and pointing all its predictors
+        # at the teacher LM (set_lm recurses into nested predictors).
+        teacher_lm = LMRegistry.get_teacher()
+        teacher = None
+        if teacher_lm is not None:
+            # set_lm() returns None — build the module first, then assign LM
+            teacher = student.deepcopy()
+            teacher.set_lm(teacher_lm)
+        # GEPA uses reflection_lm (raw LM) for proposing new instructions, not a
+        # teacher module — keep the raw LM there.
+        reflection_lm = teacher_lm
 
         optimizers = {
             "bootstrap_few_shot": lambda: dspy.BootstrapFewShot(
                 metric=metric, max_labeled_demos=4, max_bootstrapped_demos=4
-            ).compile(student=student, trainset=trainset),
+            ).compile(student=student, trainset=trainset, teacher=teacher),
             "mipro": lambda: dspy.MIPROv2(metric=metric, auto="light").compile(
-                student=student, trainset=trainset
+                student=student, trainset=trainset, teacher=teacher
             ),
             "gepa": lambda: dspy.GEPA(
-                metric=gepa_met, auto="light", reflection_lm=LMRegistry.get_teacher()
-            ).compile(
-                student=student, trainset=trainset, **self._valset_kwargs(trainset)
-            ),
+                metric=gepa_met, auto="light", reflection_lm=reflection_lm
+            ).compile(student=student, **self._valset_kwargs(trainset)),
             "sequential": lambda: dspy.BetterTogether(
                 metric=gepa_met,
                 p=dspy.GEPA(
                     metric=gepa_met,
                     auto="light",
-                    reflection_lm=LMRegistry.get_teacher(),
+                    reflection_lm=reflection_lm,
                 ),
             ).compile(
                 student=student,
-                trainset=trainset,
                 strategy="p",
                 **self._valset_kwargs(trainset),
             ),
@@ -517,7 +531,7 @@ class GFLPipeline:
         if len(trainset) >= 6:
             val_size = max(3, len(trainset) // 5)
             return {"valset": trainset[-val_size:], "trainset": trainset[:-val_size]}
-        return {}
+        return {"trainset": trainset}
 
     @staticmethod
     def _evaluate(compiled, sample, train_field, val_field) -> float:

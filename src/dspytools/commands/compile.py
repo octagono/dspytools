@@ -760,10 +760,14 @@ def compile_gfl(
 
     if single:
         # Run a single optimizer via the pipeline
+        # auto_meta=False: the user explicitly requested an optimizer — the
+        # MetaOptimizer must not silently swap it (it overrode --single gepa
+        # to bootstrap_few_shot before this fix).
         result = pipeline.run_single(
             optimizer_name=single.replace("-", "_"),
             student=student,
             trainset=trainset,
+            auto_meta=False,
         )
         click.echo(
             f"  Optimizer: {result['best_optimizer']} | Score: {result['best_score']:.4f}"
