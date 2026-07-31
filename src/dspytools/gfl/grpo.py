@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from dspy.teleprompt import GRPO
+from dspy.teleprompt.grpo import GRPO
 
 
 def compile_grpo(
