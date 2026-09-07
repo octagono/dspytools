@@ -31,7 +31,14 @@ from dspytools.core.setup import LMRegistry
 )
 @click.option("--check-gpu/--no-gpu", default=True, help="Check GPU health")
 @click.option("--check-config/--no-config", default=True, help="Validate configuration")
-def doctor_cmd(check_llm: bool, check_gpu: bool, check_config: bool):
+@click.option(
+    "--check-services/--no-services",
+    default=True,
+    help="Check dependency services (FalkorDB/Redis, embedding server)",
+)
+def doctor_cmd(
+    check_llm: bool, check_gpu: bool, check_config: bool, check_services: bool
+):
     """Run system diagnostics to verify dspytools is properly configured.
 
     Checks:
@@ -41,6 +48,8 @@ def doctor_cmd(check_llm: bool, check_gpu: bool, check_config: bool):
     - Configuration validity (.env, LM setup)
     - Registry and compiled directory health
     - DOX tree integrity
+    - Dependency services (FalkorDB/Redis, embedding) — degraded-only,
+      never a hard failure (plain inference/compile works without them)
 
     Example:
         dspytools doctor
@@ -127,57 +136,60 @@ def doctor_cmd(check_llm: bool, check_gpu: bool, check_config: bool):
         warn_check("LLM models", _check_llm_models)
 
     # ── Dependency Services (FalkorDB/Redis/Embedder) ─────────────────
-    # These are optional for plain inference but required for graph/memory/
-    # semantic-cache features. When down, show exactly how to start them.
-    console.print("\n[bold]Dependency Services:[/]")
+    # Degraded-only: a down FalkorDB/Redis or embedder warns (with start
+    # hints) but never fails the run — plain inference/compile works without
+    # them, per the graceful-degradation design (CircuitBreaker).
+    if check_services:
+        console.print("\n[bold]Dependency Services:[/]")
 
-    def _check_falkordb():
-        from dspytools.graph.client import get_graph_client
+        def _check_falkordb():
+            from dspytools.graph.client import get_graph_client
 
-        client = get_graph_client()
-        client.ping()
-        graphs = client._falkordb.list_graphs() if client._falkordb else []
-        return f"FalkorDB+Redis OK ({len(graphs) or 0} graph(s) on :6379)"
+            client = get_graph_client()
+            client.ping()
+            graphs = client._falkordb.list_graphs() if client._falkordb else []
+            return f"FalkorDB+Redis OK ({len(graphs) or 0} graph(s) on :6379)"
 
-    from dspytools.core.errors import ServiceUnavailableError
+        from dspytools.core.errors import ServiceUnavailableError
 
-    try:
-        check("FalkorDB/Redis (:6379)", _check_falkordb)
-    except ServiceUnavailableError:
-        console.print("  [red]  FalkorDB/Redis (:6379) — not reachable[/]")
-        console.print(
-            "        [dim]Required for graph, memory, and semantic-cache features.[/]"
-        )
-        console.print(
-            "        [dim]Start it:  docker compose -f docker-compose.redis.yml up -d[/]"
-        )
-        console.print(
-            "        [dim]Verify:     docker exec dspytools-redis redis-cli ping[/]"
-        )
-        fails += 1
-    except (ConnectionError, OSError):
-        console.print("  [yellow]  FalkorDB/Redis (:6379) — connection failed[/]")
-        console.print(
-            "        [dim]Start it:  docker compose -f docker-compose.redis.yml up -d[/]"
-        )
-        warnings += 1
+        try:
+            check("FalkorDB/Redis (:6379)", _check_falkordb)
+        except ServiceUnavailableError:
+            console.print("  [yellow]  FalkorDB/Redis (:6379) — not reachable[/]")
+            console.print(
+                "        [dim]Required for graph, memory, and semantic-cache features;"
+                " optional for plain inference/compile.[/]"
+            )
+            console.print(
+                "        [dim]Start it:  docker compose -f docker-compose.redis.yml up -d[/]"
+            )
+            console.print(
+                "        [dim]Verify:     docker exec dspytools-redis redis-cli ping[/]"
+            )
+            warnings += 1
+        except (ConnectionError, OSError):
+            console.print("  [yellow]  FalkorDB/Redis (:6379) — connection failed[/]")
+            console.print(
+                "        [dim]Start it:  docker compose -f docker-compose.redis.yml up -d[/]"
+            )
+            warnings += 1
 
-    def _check_embedder():
-        # GET on /v1/embeddings returns 405/400 on a live server — treat any
-        # HTTP response as reachable; only connection errors mean it's down.
-        req = urllib.request.Request(f"{_embed_url()}/v1/embeddings", method="GET")
-        urllib.request.urlopen(req, timeout=3)
-        return True
+        def _check_embedder():
+            # GET on /v1/embeddings returns 405/400 on a live server — treat any
+            # HTTP response as reachable; only connection errors mean it's down.
+            req = urllib.request.Request(f"{_embed_url()}/v1/embeddings", method="GET")
+            urllib.request.urlopen(req, timeout=3)
+            return True
 
-    try:
-        warn_check("Embedding server", _check_embedder)
-    except (OSError, ValueError, urllib.error.URLError):
-        console.print("  [yellow]  Embedding server — not reachable[/]")
-        console.print(
-            "        [dim]Optional (only semantic cache needs it).[/]"
-            " Set DSPYTOOLS_EMBEDDING_URL to an OpenAI-compatible endpoint."
-        )
-        warnings += 1
+        try:
+            warn_check("Embedding server", _check_embedder)
+        except (OSError, ValueError, urllib.error.URLError):
+            console.print("  [yellow]  Embedding server — not reachable[/]")
+            console.print(
+                "        [dim]Optional (only semantic cache needs it).[/]"
+                " Set DSPYTOOLS_EMBEDDING_URL to an OpenAI-compatible endpoint."
+            )
+            warnings += 1
 
     # ── GPU Health ─────────────────────────────────────────────
     if check_gpu:
