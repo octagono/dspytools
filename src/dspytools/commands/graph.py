@@ -95,18 +95,60 @@ def graph_skill_tree(skill: str | None):
 
 @graph_cmd.command(name="program-lineage", cls=LLMCommand)
 @click.argument("run_id")
-def graph_program_lineage(run_id: str):
-    """Show program ancestry chain."""
+@click.option(
+    "--visualize",
+    is_flag=True,
+    help="Render the ancestry chain as an ASCII tree (evolution trajectory)",
+)
+def graph_program_lineage(run_id: str, visualize: bool):
+    """Show program ancestry chain.
+
+    Traces how a program evolved across compiles — each ancestor's optimizer,
+    score, and improvement. Useful for auditing how a self-evolving program
+    arrived at its current behavior.
+    """
     graph = FalkorDBSkillGraph()
     lineage = graph.program_lineage(run_id)
 
-    if lineage:
+    if not lineage:
+        info(f"No lineage found for {run_id}")
+        return
+
+    if visualize:
+        # ASCII tree from oldest ancestor → newest (the given run_id is last).
+        click.echo(f"\n  Program lineage: {run_id}\n")
+        for i, r in enumerate(lineage):
+            is_last = i == len(lineage) - 1
+            branch = "└── " if is_last else "├── "
+            score = r.get("score", "")
+            score_txt = (
+                f"score={float(score):.3f}"
+                if isinstance(score, (int, float)) or _is_float(score)
+                else f"score={score}"
+            )
+            delta = ""
+            if i > 0:
+                prev = lineage[i - 1].get("score")
+                if isinstance(prev, (int, float)) and isinstance(score, (int, float)):
+                    delta = f"  Δ {score - prev:+.3f}"
+            click.echo(
+                f"  {branch}{r['id'][:40]}  [{r.get('optimizer', '?')}]  {score_txt}{delta}"
+            )
+        click.echo("")
+    else:
         rows = [
             [r["id"], r.get("optimizer", ""), str(r.get("score", ""))] for r in lineage
         ]
         table("Program Lineage", ["Run ID", "Optimizer", "Score"], rows)
-    else:
-        info(f"No lineage found for {run_id}")
+
+
+def _is_float(s) -> bool:
+    """Return True when a value can be parsed as float."""
+    try:
+        float(s)
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 @graph_cmd.command(name="migrate", cls=LLMCommand)

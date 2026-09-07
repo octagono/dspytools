@@ -68,9 +68,9 @@ class TestGraphCommandFunctions:
         from dspytools.commands.graph import graph_program_lineage
 
         mg["skill_graph"].program_lineage.return_value = [
-            {"id": "parent", "optimizer": "mipro"}
+            {"id": "parent", "optimizer": "mipro", "score": 0.7}
         ]
-        graph_program_lineage.callback("run_003")
+        graph_program_lineage.callback("run_003", visualize=False)
         mg["skill_graph"].program_lineage.assert_called_once_with("run_003")
 
     def test_search(self, mock_graph: dict[str, Any]):

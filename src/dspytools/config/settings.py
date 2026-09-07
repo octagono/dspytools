@@ -173,7 +173,7 @@ def llm_url() -> str:
     if env:
         return env
     cfg = load_config()
-    student = cfg.get("lm", {}).get("student", {})
+    student = cfg.get("lm", {}).get("student") or {}
     api_base = student.get("api_base", "")
     if api_base:
         # Strip /v1 or /v1/ suffix to get base URL

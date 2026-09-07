@@ -18,6 +18,7 @@ from dspytools.cli.output import console, ok, panel, warn
 from dspytools.cli.rich_config import LLMCommand, click
 from dspytools.config.settings import compiled_dir
 from dspytools.config.settings import config_dir as _cdir
+from dspytools.config.settings import embedding_url as _embed_url
 from dspytools.config.settings import llm_url as _llm_url
 from dspytools.core._dspy import dspy
 from dspytools.core.registry import list_compiled_runs
@@ -104,20 +105,79 @@ def doctor_cmd(check_llm: bool, check_gpu: bool, check_config: bool):
             base = _llm_url()
             # Try /v1/models (OpenAI-compatible), /api/tags (llama-cpp), then /health
             for path in ("/v1/models", "/api/tags", "/health"):
-                resp = urllib.request.urlopen(f"{base}{path}", timeout=3)
-                if resp.status == 200:
-                    return f"reachable at {path}"
+                try:
+                    resp = urllib.request.urlopen(f"{base}{path}", timeout=3)
+                    if resp.status == 200:
+                        return f"reachable at {path}"
+                except (OSError, urllib.error.URLError):
+                    continue
             return False
 
         warn_check("LLM health", _check_llm_health)
 
         def _check_llm_models():
-            resp = urllib.request.urlopen(f"{_llm_url()}/v1/models", timeout=3)
-            data = json.loads(resp.read())
-            models = [m["id"] for m in data.get("data", [])]
-            return f"{len(models)} model(s): {', '.join(models[:3])}"
+            try:
+                resp = urllib.request.urlopen(f"{_llm_url()}/v1/models", timeout=3)
+                data = json.loads(resp.read())
+                models = [m["id"] for m in data.get("data", [])]
+                return f"{len(models)} model(s): {', '.join(models[:3])}"
+            except (OSError, ValueError, urllib.error.URLError):
+                return False
 
         warn_check("LLM models", _check_llm_models)
+
+    # ── Dependency Services (FalkorDB/Redis/Embedder) ─────────────────
+    # These are optional for plain inference but required for graph/memory/
+    # semantic-cache features. When down, show exactly how to start them.
+    console.print("\n[bold]Dependency Services:[/]")
+
+    def _check_falkordb():
+        from dspytools.graph.client import get_graph_client
+
+        client = get_graph_client()
+        client.ping()
+        graphs = client._falkordb.list_graphs() if client._falkordb else []
+        return f"FalkorDB+Redis OK ({len(graphs) or 0} graph(s) on :6379)"
+
+    from dspytools.core.errors import ServiceUnavailableError
+
+    try:
+        check("FalkorDB/Redis (:6379)", _check_falkordb)
+    except ServiceUnavailableError:
+        console.print("  [red]  FalkorDB/Redis (:6379) — not reachable[/]")
+        console.print(
+            "        [dim]Required for graph, memory, and semantic-cache features.[/]"
+        )
+        console.print(
+            "        [dim]Start it:  docker compose -f docker-compose.redis.yml up -d[/]"
+        )
+        console.print(
+            "        [dim]Verify:     docker exec dspytools-redis redis-cli ping[/]"
+        )
+        fails += 1
+    except (ConnectionError, OSError):
+        console.print("  [yellow]  FalkorDB/Redis (:6379) — connection failed[/]")
+        console.print(
+            "        [dim]Start it:  docker compose -f docker-compose.redis.yml up -d[/]"
+        )
+        warnings += 1
+
+    def _check_embedder():
+        # GET on /v1/embeddings returns 405/400 on a live server — treat any
+        # HTTP response as reachable; only connection errors mean it's down.
+        req = urllib.request.Request(f"{_embed_url()}/v1/embeddings", method="GET")
+        urllib.request.urlopen(req, timeout=3)
+        return True
+
+    try:
+        warn_check("Embedding server", _check_embedder)
+    except (OSError, ValueError, urllib.error.URLError):
+        console.print("  [yellow]  Embedding server — not reachable[/]")
+        console.print(
+            "        [dim]Optional (only semantic cache needs it).[/]"
+            " Set DSPYTOOLS_EMBEDDING_URL to an OpenAI-compatible endpoint."
+        )
+        warnings += 1
 
     # ── GPU Health ─────────────────────────────────────────────
     if check_gpu:

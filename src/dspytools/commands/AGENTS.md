@@ -36,12 +36,12 @@ Each file owns its command group. No file-level cross-dependencies — commands 
 | `configure.py` | `configure` | API key management (secure hidden-prompt input, --stdin pipe mode), LM registry (student/teacher), adapter selection, DSPy runtime settings, cache control, shell completion (install/uninstall/status/show) |
 | `data.py` | `data` | Dataset management — list, import, export, inspect datasets |
 | `distill.py` | `distill` | LoRA distillation pipeline — run, list-frameworks, stats, prepare-colab, check (dependency verification) |
-| `doctor.py` | `doctor` | System diagnostics — Python/dep/GPU/config/registry/LM/MCP health checks |
+| `doctor.py` | `doctor` | System diagnostics — Python/dep/GPU/config/registry/LM/MCP health checks. Also checks dependency services (FalkorDB/Redis :6379, embedding server) with actionable start-up hints (docker compose command) when down; exits 1 on critical service failure. |
 | `evaluate.py` | `evaluate` | Evaluation pipeline — run metrics against compiled programs on devsets |
 | `export.py` | `export` | Program export/packaging — list, package, info subcommands |
 | `generate.py` | `generate` | llms.txt generation — `llms-txt`, `batch`, `explore`, `warmup` (pre-seed analysis cache with known URL patterns) subcommands |
 | `gfl.py` | `gfl` | GFL pipeline commands — loop, status, synthesize, meta-optimize, decompose, ab-test, consolidate, spin, lse, gepa, opsd |
-| `graph.py` | `graph` | FalkorDB graph management — status, query, migrate, benchmark (p50/p95/p99 latency), cascade (BFS drift→recompile with --dry-run/--no-dry-run) |
+| `graph.py` | `graph` | FalkorDB graph management — status, query, migrate, benchmark (p50/p95/p99 latency), cascade (BFS drift→recompile with --dry-run/--no-dry-run), program-lineage (ancestry chain, --visualize renders an ASCII evolution tree with per-step score deltas) |
 | `inspect.py` | `inspect` | Program inspection — load and display compiled program structure |
 | `lora.py` | `lora` | LoRA adapter management — load, unload, list, chat, test, health, discover, extract, evaluate (bootstrap p-value CI with auto drift registration), train |
 | `mcp.py` | `mcp` | MCP server management — start/stop/status of MCP tool servers |
