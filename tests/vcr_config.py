@@ -3,21 +3,29 @@
 Records real LLM HTTP calls to YAML cassette files, then replays them
 on subsequent runs — zero API cost, deterministic CI.
 
-Usage in tests:
+The working fixtures live in ``tests/conftest.py``:
 
-    import vcrpy
+- ``vcr_instance`` (session) — a configured ``vcr.VCR`` that records/replays
+  dspy LM HTTP calls. Set ``VCR_RECORD=1`` to force re-recording.
+- ``student_lm`` — a ``dspy.LM`` pointed at the local model
+  (``DSPYTOOLS_TEST_LM_URL`` / ``DSPYTOOLS_TEST_LM_MODEL``, defaults to the
+  llama-cpp server on :8080). Returns None when no LM is reachable.
 
-    @pytest.mark.vcr
-    def test_predict():
+Usage in tests (see tests/test_optimizer_behavior.py):
+
+    def test_predict(student_lm, vcr_instance):
         from dspytools.core._dspy import dspy
-        # First run: records to tests/cassettes/test_predict.yaml
-        # Subsequent runs: replays from cassette (no LM call)
-        result = dspy.Predict("question -> answer")(question="What is 2+2?")
-        assert result.answer == "4"
+        with vcr_instance.use_cassette("test_predict.yaml"):
+            with dspy.context(lm=student_lm):
+                result = dspy.Predict("question -> answer")(question="What is 2+2?")
+        assert result.answer.strip()
+
+First run records to tests/cassettes/test_predict.yaml; subsequent runs replay
+it with no LM call.
 
 To re-record cassettes (when prompts change):
     rm tests/cassettes/*.yaml
-    pytest tests/ -k vcr  # re-records from live LM
+    VCR_RECORD=1 pytest tests/test_optimizer_behavior.py
 """
 
 from __future__ import annotations

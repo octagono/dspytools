@@ -24,7 +24,6 @@ from dspytools.cli.output import (
 from dspytools.cli.output import header as section
 from dspytools.cli.output import panel as rich_panel
 from dspytools.cli.output import spinner as rich_spinner
-from dspytools.cli.output import syntax as rich_syntax
 from dspytools.cli.output import table as rich_table
 from dspytools.cli.rich_config import LLMCommand, LLMGroup, click
 from dspytools.config.settings import embedder_kwargs
@@ -262,9 +261,13 @@ _MODULE_TYPES = {
     "cot": ("ChainOfThought", "dspy.ChainOfThought(signature)"),
     "react": ("ReAct", "dspy.ReAct(signature, tools=[...])"),
     "react-v2": ("ReActV2", "dspy.ReActV2(signature, tools=[...])"),
-    "pot": ("ProgramOfThought", "dspy.ProgramOfThought(signature)"),
-    "code-act": ("CodeAct", "dspy.CodeAct(signature, tools=[...])"),
+    "pot": ("RLM", "dspy.RLM(signature, max_iters=10)"),
+    "code-act": ("RLM", "dspy.RLM(signature, tools=[...], max_iters=10)"),
     "rlm": ("RLM", "dspy.RLM(signature, max_iters=20)"),
+    "flex": (
+        "Flex",
+        "dspy.Flex(signature, tools=[...], max_predictor_calls=100)",
+    ),
     "best-of-n": ("BestOfN", "dspy.BestOfN(module, N=5, ...)"),
     "refine": ("Refine", "dspy.Refine(module, N=5, ...)"),
     "multi-chain": (
@@ -488,16 +491,85 @@ def _extract_reply_from_lm_history() -> str | None:
     return None
 
 
+# ── flex ──────────────────────────────────────────────────────────────────
+
+
+@run_cmd.command(name="flex", cls=LLMCommand)
+@click.argument("signature")
+@click.option("--inputs", "-i", multiple=True, help="Inputs as KEY=VALUE")
+@click.option("--tools", "-t", multiple=True, help="Tool names or MCP server:tool")
+@click.option("--lm", help="LM model to use")
+@click.option("--temperature", type=float, default=0.2)
+@click.option("--max-tokens", type=int, default=4096)
+@click.option("--max-predictor-calls", type=int, default=100)
+def run_flex(
+    signature: str,
+    inputs: tuple[str, ...],
+    tools: tuple[str, ...],
+    lm: str | None,
+    temperature: float,
+    max_tokens: int,
+    max_predictor_calls: int,
+):
+    """Run a dspy.Flex program (optimizable module code).
+
+    Optionally with tools; the baseline becomes dspy.RLM when tools are given.
+    """
+
+    _show_command_header("flex")
+    _show_inputs(_parse_inputs(inputs))
+    _show_model_info(lm)
+    if tools:
+        info(f"Tools: [bold]{', '.join(tools)}[/]")
+    info(f"Max predictor calls: [{_DIM}]{max_predictor_calls}[/]")
+
+    t0 = time.time()
+    setup_dspy(model=lm, temperature=temperature, max_tokens=max_tokens)
+    dspy_tools = _load_tools(tools)
+    kwargs = _parse_inputs(inputs)
+
+    sp = rich_spinner()
+    with sp:
+        sp.add_task("Running Flex...")
+        prog = dspy.Flex(
+            signature,
+            tools=dspy_tools or None,
+            max_predictor_calls=max_predictor_calls,
+        )
+        try:
+            result = prog(**kwargs)
+        except Exception as e:
+            rich_panel("Error", str(e), border_style=_ERROR)
+            _show_timing(t0)
+            raise click.ClickException(str(e)) from e
+
+    answer = getattr(result, "answer", getattr(result, "output", str(result)))
+    _show_answer(answer)
+    _show_timing(t0)
+
+
 # ── pot ──────────────────────────────────────────────────────────────────
 
 
 @run_cmd.command(name="pot", cls=LLMCommand)
 @click.argument("signature")
 @click.option("--inputs", "-i", multiple=True, help="Inputs as KEY=VALUE")
-@click.option("--max-iters", default=3, type=int)
+@click.option("--max-iters", default=10, type=int)
+@click.option("--max-llm-calls", default=30, type=int)
 @click.option("--lm", help="LM model to use")
-def run_pot(signature: str, inputs: tuple[str, ...], max_iters: int, lm: str | None):
-    """Run a ProgramOfThought module (generates and executes Python code)."""
+def run_pot(
+    signature: str,
+    inputs: tuple[str, ...],
+    max_iters: int,
+    max_llm_calls: int,
+    lm: str | None,
+):
+    """Run a ProgramOfThought-style module on the RLM engine.
+
+    dspy.ProgramOfThought is deprecated in DSPy 3.3.1 (removal in 3.5) with
+    RLM as its replacement. This command keeps the familiar ``pot`` surface but
+    executes on the sandboxed RLM REPL (reasoning via code execution).
+    """
     _show_command_header("pot")
     _show_inputs(_parse_inputs(inputs))
     _show_model_info(lm)
@@ -509,25 +581,14 @@ def run_pot(signature: str, inputs: tuple[str, ...], max_iters: int, lm: str | N
 
     sp = rich_spinner()
     with sp:
-        sp.add_task("Generating & executing code...")
-        result = dspy.ProgramOfThought(signature, max_iters=max_iters)(**kwargs)
+        sp.add_task("Reasoning & executing code...")
+        result = dspy.RLM(
+            signature,
+            max_iters=max_iters,
+            max_llm_calls=max_llm_calls,
+        )(**kwargs)
 
-    answer = getattr(result, "answer", None)
-    reasoning = getattr(result, "reasoning", None)
-
-    if reasoning:
-        if reasoning.strip().startswith("def ") or "import " in reasoning[:200]:
-            rich_syntax(reasoning, lang="python")
-        else:
-            info(
-                f"Reasoning: [{_DIM}]{reasoning[:300]}...[/]"
-                if len(reasoning) > 300
-                else f"Reasoning: {reasoning}"
-            )
-    if answer is not None:
-        rich_panel("Answer", str(answer), border_style=_CODE)
-    else:
-        _show_result(result, border=_CODE)
+    _show_result(result, border=_CODE)
     _show_timing(t0)
 
 
@@ -538,16 +599,23 @@ def run_pot(signature: str, inputs: tuple[str, ...], max_iters: int, lm: str | N
 @click.argument("signature")
 @click.option("--inputs", "-i", multiple=True, help="Inputs as KEY=VALUE")
 @click.option("--tools", "-t", multiple=True, help="Tool names (plain functions only)")
-@click.option("--max-iters", default=5, type=int)
+@click.option("--max-iters", default=10, type=int)
+@click.option("--max-llm-calls", default=30, type=int)
 @click.option("--lm", help="LM model to use")
 def run_code_act(
     signature: str,
     inputs: tuple[str, ...],
     tools: tuple[str, ...],
     max_iters: int,
+    max_llm_calls: int,
     lm: str | None,
 ):
-    """Run a CodeAct module (code generation + tool execution)."""
+    """Run a CodeAct-style module on the RLM engine.
+
+    dspy.CodeAct is deprecated in DSPy 3.3.1 (removal in 3.5) with RLM as its
+    replacement. This command keeps the familiar ``code-act`` surface but
+    executes on the sandboxed RLM REPL (code generation + tool execution).
+    """
     _show_command_header("code-act")
     _show_inputs(_parse_inputs(inputs))
     _show_model_info(lm)
@@ -562,16 +630,15 @@ def run_code_act(
 
     sp = rich_spinner()
     with sp:
-        sp.add_task("Running code-act...")
-        result = dspy.CodeAct(signature, tools=dspy_tools, max_iters=max_iters)(
-            **kwargs
-        )
+        sp.add_task("Reasoning, executing code & calling tools...")
+        result = dspy.RLM(
+            signature,
+            tools=dspy_tools,
+            max_iters=max_iters,
+            max_llm_calls=max_llm_calls,
+        )(**kwargs)
 
-    answer = getattr(result, "answer", None)
-    if answer is not None:
-        rich_panel("Answer", str(answer), border_style=_CODE)
-    else:
-        _show_result(result, border=_CODE)
+    _show_result(result, border=_CODE)
     _show_timing(t0)
 
 
@@ -581,6 +648,9 @@ def run_code_act(
 @run_cmd.command(name="rlm", cls=LLMCommand)
 @click.argument("signature")
 @click.option("--inputs", "-i", multiple=True, help="Inputs as KEY=VALUE")
+@click.option(
+    "--tools", "-t", multiple=True, help="Tool names (plain functions or server:tool)"
+)
 @click.option("--max-iters", default=10, type=int)
 @click.option("--max-llm-calls", default=30, type=int)
 @click.option("--lm", help="Main LM")
@@ -588,6 +658,7 @@ def run_code_act(
 def run_rlm(
     signature: str,
     inputs: tuple[str, ...],
+    tools: tuple[str, ...],
     max_iters: int,
     max_llm_calls: int,
     lm: str | None,
@@ -597,6 +668,8 @@ def run_rlm(
     _show_command_header("rlm")
     _show_inputs(_parse_inputs(inputs))
     _show_model_info(lm)
+    if tools:
+        info(f"Tools: [bold]{', '.join(tools)}[/]")
     if sub_lm:
         info(f"Sub-LM: [{_DIM}]{sub_lm}[/]")
     info(
@@ -607,6 +680,7 @@ def run_rlm(
     t0 = time.time()
     setup_dspy(model=lm, temperature=0.2, max_tokens=4096)
     kwargs = _parse_inputs(inputs)
+    dspy_tools = _load_tools(tools)
     sub_lm_obj = LMRegistry.get(model=sub_lm, temperature=0.0) if sub_lm else None
 
     sp = rich_spinner()
@@ -614,6 +688,7 @@ def run_rlm(
         sp.add_task("Running RLM...")
         result = dspy.RLM(
             signature,
+            tools=dspy_tools,
             max_iters=max_iters,
             max_llm_calls=max_llm_calls,
             sub_lm=sub_lm_obj,

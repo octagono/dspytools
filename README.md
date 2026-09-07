@@ -2,15 +2,15 @@
 
 # DSPyTools — Self-Evolving DSPy CLI
 
-**24 command groups · 110+ subcommands · 105 source files · 17+ optimizers · 11 arXiv paper implementations**
+**24 command groups · 166 subcommands · 102 source files · 17+ optimizers · 11 arXiv paper implementations**
 
 ![Python](https://img.shields.io/badge/python-3.12+-blue)
-![DSPy](https://img.shields.io/badge/dspy-3.3.0b1-green)
+![DSPy](https://img.shields.io/badge/dspy-3.3.1-green)
 ![MLflow](https://img.shields.io/badge/mlflow-integrated-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Ruff](https://img.shields.io/badge/ruff-zero--errors-brightgreen)
 ![Pyright](https://img.shields.io/badge/pyright-zero--errors-brightgreen)
-![Tests](https://img.shields.io/badge/tests-360-pass-brightgreen)
+![Tests](https://img.shields.io/badge/tests-363-pass-brightgreen)
 
 A production-grade, self-evolving CLI for DSPy program management — featuring hot-swap inference,
 MCP agent interoperability, a Generative Feedback Loop (GFL) pipeline, skills system,
@@ -18,7 +18,7 @@ llms.txt generation, and full MLflow experiment tracking.
 
 **All subsystems integrated via SSOT (Single Source of Truth) pattern with fail-fast imports.**
 
-Built on **DSPy 3.3.0b1**, runs on **Qwen3.5-9B** (student+teacher inference via llama-cpp-server),
+Built on **DSPy 3.3.1**, runs on **Qwen3.5-9B** (student+teacher inference via llama-cpp-server),
 with **DeepSeek V4 Flash** as an optional teacher LM for heavy optimization.
 
 ---
@@ -126,22 +126,22 @@ graph TD
 
 | Group | Subcommands | Description |
 |-------|-------------|-------------|
-| `configure` | 5 | API keys, LM config, adapters, DSPy settings, cache |
+| `configure` | 6 | API keys, LM config, adapters, DSPy settings, cache, completion |
 | `signature` | 5 | Create, list, show, edit, delete DSPy signatures |
 | `module` | 5 | Create, list, call, show, delete DSPy modules |
-| `run`   | 15 | 12 inference strategies + list + retrieve + knn |
-| `compile` | 22 | 20 optimizers + submit/status/list/cancel |
+| `run`   | 16 | 13 inference strategies + list + retrieve + knn |
+| `compile` | 23 | 21 optimizers + submit/status/list/cancel |
 | `agent`  | 4 | New, list, run, delete ReActV2 agents |
 | `tool`  | 6 | List, show, from-mcp, inspect, python-interpreter, history |
 | `evaluate`| 2 | Run evaluation, list available metrics |
 | `data`  | 3 | List, load, preview datasets |
-| `distill` | 4 | LoRA distillation pipeline (run, list-frameworks, stats, prepare-colab) |
+| `distill` | 5 | LoRA distillation pipeline (run, list-frameworks, stats, prepare-colab, check) |
 | `inspect` | 7 | History, config, cache, tools, experimental, version |
-| `lora`  | 10 | LoRA adapter management (load, unload, list, chat, test, health, discover, extract, evaluate, train) |
+| `lora`  | 9 | LoRA adapter management (load, unload, list, chat, health, discover, extract, evaluate, train) |
 | `mcp`   | 3 | List MCP tools, serve (stdio/SSE), config |
 | `server` | 8 | Enable/disable, start/stop/restart, status, swap, list |
-| `self`  | 7 | Optimize, status, evolve, distill, ucb-status, ucb-reset, watch |
-| `gfl`   | 10 | Synthesize, meta-optimize, decompose, ab-test, consolidate, spin, lse, gepa, opsd, status |
+| `self`  | 8 | Optimize, status, evolve, distill, auto-fix, ucb-status, ucb-reset, watch |
+| `gfl`   | 11 | loop, synthesize, meta-optimize, decompose, ab-test, consolidate, spin, lse, gepa, opsd, status |
 | `skills` | 10 | List, create, search, compile, auto-optimize, show, find, discover, categories, generate-from-run |
 | `generate`| 4 | llms.txt generation, batch eval, MCP git exploration, cache warmup |
 | `pipeline`| 3 | Compose, run, list multi-step compile pipelines |
@@ -149,7 +149,7 @@ graph TD
 | `compare` | 1 | Side-by-side program comparison |
 | `doctor` | 1 | System diagnostics, environment check, dependency audit |
 | `graph`  | 14 | Query, stats, skill-tree, lineage, migrate, redis, search, status, dependents, add-dependency, record-program, flush, benchmark, cascade |
-| `memory` | 4 | FalkorDB-native persistent memory (add, search, get-all, delete) |
+| `memory` | 9 | FalkorDB-native persistent memory (add, search, get-all, get, update, delete, list, reset, stats) |
 
 ### 17+ DSPy Optimizers
 
@@ -399,7 +399,7 @@ cp .env.example .env  # Set DEEPSEEK_API_KEY
 
 # 2. Configure student + teacher models
 dspytools configure lm set "unsloth/Qwen3.5-9B-GGUF" \
- --api-base http://localhost:11434/v1 --role student
+ --api-base http://localhost:8080/v1 --role student
 dspytools configure lm set "deepseek/deepseek-v4-flash" --role teacher
 
 # 3. Create a module
@@ -468,7 +468,7 @@ dspytools configure key set <provider> <key>  # Set API key
 dspytools configure key list          # List configured keys
 dspytools configure lm set <model> [--role]   # Set LM (student/teacher)
 dspytools configure lm list           # List configured LMs
-dspytools configure adapter set <name> <type>  # Set adapter
+dspytools configure adapter set <type>      # Set adapter (chat|json|xml|baml)
 dspytools configure cache enable/disable/clear # Manage DSPy cache
 dspytools configure dspy set/show <setting>   # Configure DSPy backend
 dspytools configure dspy optimize        # Auto-optimize DSPy settings
@@ -495,9 +495,9 @@ dspytools run predict <signature> -i <key>=<val>  # Standard prediction
 dspytools run cot <signature> -i <key>=<val>     # Chain-of-thought
 dspytools run react <signature> -i <key>=<val>    # ReAct agent
 dspytools run react-v2 <signature> -i <key>=<val>  # ReActV2 agent
-dspytools run pot <signature> -i <key>=<val>     # Program-of-Thought
-dspytools run code-act <signature> -i <key>=<val>  # CodeAct agent
-dspytools run rlm <signature> -i <key>=<val>     # ReRank LM
+dspytools run pot <signature> -i <key>=<val>     # Program-of-Thought style (RLM-backed)
+dspytools run code-act <signature> -i <key>=<val>  # CodeAct style (RLM-backed with tools)
+dspytools run rlm <signature> -i <key>=<val>     # Recursive Language Model
 dspytools run best-of-n <signature> -i <key>=<val>  # Best-of-N sampling
 dspytools run refine <signature> -i <key>=<val>   # Progressive refinement
 dspytools run multi-chain <signature> -i <key>=<val> # Multi-chain reasoning
@@ -585,6 +585,7 @@ dspytools data list               # List available datasets
 ```bash
 dspytools gfl synthesize <seed.json> --target 30  # Generate synthetic data
 dspytools gfl meta-optimize <program>        # Meta-learn best optimizer
+dspytools gfl loop <run-id> <trainset.json>   # Full GFL cycle (monitor→synthesize→meta-learn→evaluate)
 dspytools gfl decompose <task>            # Decompose complex tasks
 dspytools gfl ab-test <run-a> <run-b> --trials 20  # A/B test programs
 dspytools gfl spin <module>              # SPIN self-play optimization (arXiv 2401.01335)
@@ -799,7 +800,7 @@ dspytools/
 │  ├── api/ (1)        ← FastAPI hot-swap server
 │  ├── config/ (2)       ← Config: settings (hot-reload, env var overrides), env
 │  └── cli/ (3)        ← Rich output utilities (llm_help, output, rich_config)
-├── tests/ (24 files)      ← 360 smoke tests (zero LLM dependency)
+├── tests/ (25 files)      ← 363 tests (incl. recorded-LM behavior tests, zero live-LLM dependency)
 ├── docker-compose.redis.yml  ← Redis Stack + FalkorDB container
 ├── AGENTS.md          ← DOX framework root
 ├── pyproject.toml       ← UV project + pyright + pytest config
@@ -859,7 +860,7 @@ AGENTS.md (root)
 - **llama-cpp-server** (Qwen3.5-9B on port 8080)
 - **Embeddings** (embeddinggemma on port 8001, optional)
 - **DeepSeek API key** (for teacher LM optimization)
-- **Deno** (for ProgramOfThought / PythonInterpreter sandbox)
+- **Deno** (for `run rlm` / `dspy.RLM` and `dspy.Flex` sandboxed code execution; optional if unused)
 - **MLflow** 3.5.1+ (optional, automatic fallback to local file store)
 - **Redis Stack** (for FalkorDB graph + semantic cache + persistent memory)
  - `docker compose -f docker-compose.redis.yml up -d`

@@ -369,6 +369,13 @@ class ConfigCache:
                 "api": {"enabled": False, "port": 8080},
             },
             "lm": {"default": None, "registry": {}, "student": None, "teacher": None},
+            "falkordb": {
+                "host": "localhost",
+                "port": 6379,
+                "password": None,
+                "db": 0,
+                "database": "dspytools",
+            },
             "keys": {},
         }
 

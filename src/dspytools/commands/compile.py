@@ -24,9 +24,10 @@ Explicit (special):
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
-from dspytools.cli.output import fail, force_option, label_option, panel
+from dspytools.cli.output import fail, force_option, label_option, panel, table
 from dspytools.cli.rich_config import LLMCommand, LLMGroup, click
 from dspytools.config.settings import embedder_kwargs
 from dspytools.core._dspy import dspy
@@ -35,7 +36,11 @@ from dspytools.core.drift_monitor import get_drift_monitor
 from dspytools.core.holdout import get_holdout_gate
 from dspytools.core.loaders import load_module_by_name, load_trainset
 from dspytools.core.logging_config import get_logger
-from dspytools.core.metrics import exact_match_metric, gepa_metric
+from dspytools.core.metrics import (
+    exact_match_metric,
+    gepa_metric,
+    gepa_metric_cost_aware,
+)
 from dspytools.core.mlflow_tracker import get_tracker
 from dspytools.core.output import create_run_dir, save_program
 from dspytools.core.registry import (
@@ -54,6 +59,73 @@ from dspytools.gfl.pipeline import GFLPipeline
 
 _log = get_logger(__name__)
 
+# Keys that dspy.GEPA.__init__ rejects in 3.3.1+ (ValueError at construction).
+# Previously silently ignored; now a hard fail — surface it as a clear CLI error.
+_GEPA_UNSUPPORTED_KWARGS = frozenset(
+    {"max_reflection_cost", "reflection_prompt_template"}
+)
+
+
+def _parse_gepa_kwargs(gepa_kwargs: tuple[str, ...]) -> dict[str, Any] | None:
+    """Parse ``--gepa-kwargs key=value`` tuples (values JSON-parsed) into a dict.
+
+    Rejects kwargs that DSPy 3.3.1's ``dspy.GEPA`` refuses at construction time
+    (``max_reflection_cost``, ``reflection_prompt_template``) with a clear CLI
+    error instead of a raw ``ValueError`` deep in the optimizer.
+    """
+    gk: dict[str, Any] = {}
+    for kv in gepa_kwargs:
+        k, _, v = kv.partition("=")
+        try:
+            v = json.loads(v)
+        except (ValueError, TypeError):
+            pass
+        gk[k.strip()] = v
+    unsupported = sorted(set(gk) & _GEPA_UNSUPPORTED_KWARGS)
+    if unsupported:
+        raise click.ClickException(
+            f"unsupported GEPA kwargs for DSPy 3.3.1: {', '.join(unsupported)}"
+            " (max_reflection_cost is not supported by dspy.GEPA;"
+            " reflection_prompt_template must be passed via instruction_proposer instead)"
+        )
+    return gk or None
+
+
+# Estimated token cost per optimizer (per trainset example). Follows the
+# established cost-tracking convention: real LM usage isn't surfaced by the
+# optimizers, so cost is estimated by optimizer intensity × dataset size.
+_OPTIMIZER_TOKEN_MULTIPLIERS: dict[str, int] = {
+    "knn": 2000,
+    "mipro": 5000,
+    "gepa": 8000,
+    "copro": 4000,
+    "simba": 3000,
+    "bootstrap_few_shot": 3000,
+    "sequential": 5000,
+    "labeled_few_shot": 500,
+}
+
+
+def _estimate_optimizer_cost(
+    optimizer_name: str, trainset_size: int
+) -> tuple[int, float]:
+    """Estimate (tokens, cost_usd) for a compile with the given optimizer.
+
+    Uses per-optimizer token multipliers × dataset size and the DeepSeek
+    pricing table (SSOT: core.cost_tracker PRICING). Optimizer names that map
+    to compile subcommands are normalized (hyphens → underscores).
+    """
+    from dspytools.core.cost_tracker import TokenUsage
+
+    norm = optimizer_name.replace("-", "_")
+    tokens = trainset_size * _OPTIMIZER_TOKEN_MULTIPLIERS.get(norm, 3000)
+    usage = TokenUsage.estimate(
+        "deepseek/deepseek-v4-flash",
+        prompt_tokens=tokens // 2,
+        completion_tokens=tokens // 2,
+    )
+    return tokens, usage.cost_estimate
+
 
 @click.group(name="compile", cls=LLMGroup)
 def compile_cmd():
@@ -69,6 +141,7 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
     module_type = kwargs.get("module_type", "predict")
     run_dir = kwargs.get("run_dir", name)
     needs_teacher = kwargs.get("needs_teacher", False)
+    extra_options = kwargs.get("extra_options", {})
 
     @click.argument("module_name")
     @click.argument("trainset_path")
@@ -80,6 +153,8 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
         label: str | None,
         force: bool = False,
         draft: bool = False,
+        use_mlflow: bool = False,
+        gepa_kwargs: tuple[str, ...] = (),
     ):
         setup_dspy()
         student = load_module_by_name(module_name)
@@ -113,6 +188,11 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
                     click.echo("  No teacher LM configured", err=True)
                     raise click.Abort()
                 extra_params["reflection_lm"] = teacher
+
+            # GEPA: forward --use-mlflow and parsed --gepa-kwargs
+            if name == "gepa":
+                extra_params["gepa_kwargs"] = _parse_gepa_kwargs(gepa_kwargs)
+                extra_params["use_mlflow"] = use_mlflow
 
             opt = cls_lambda(metric=metric, trainset=trainset, **extra_params)
             # KNNFewShot consumes trainset in __init__, not compile()
@@ -149,14 +229,7 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
                 )
 
         # Cost tracking (approximate based on trainset size and optimizer)
-        token_multipliers = {
-            "knn": 2000,
-            "mipro": 5000,
-            "gepa": 8000,
-            "copro": 4000,
-            "simba": 3000,
-        }
-        est_tokens = len(trainset) * token_multipliers.get(name, 3000)
+        est_tokens, _ = _estimate_optimizer_cost(name, len(trainset))
 
         cost = CompileCost(compile_id="", optimizer=name)
         cost.add_call(
@@ -237,6 +310,10 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
         monitor = get_drift_monitor()
         monitor.update_baseline(run_id, validation.get("score", 0.5))
 
+    # Apply per-optimizer extra options (e.g. --use-mlflow, --gepa-kwargs for GEPA)
+    for opt_str, opt_kwargs in extra_options.items():
+        cmd = click.option(opt_str, **opt_kwargs)(cmd)
+
     if needs_teacher:
         cmd = click.option(
             "--draft/--no-draft",
@@ -270,13 +347,19 @@ _OPTIMIZER_SPECS = {
             metric=metric,
             auto=kw.pop("auto", "light"),
             reflection_lm=kw.pop("reflection_lm", None),
+            use_mlflow=kw.pop("use_mlflow", False),
+            gepa_kwargs=kw.pop("gepa_kwargs", None),
         ),
         "params": {},
         "needs_teacher": True,
         "extra_options": {
-            "--draft/--no-draft": {
+            "--use-mlflow/--no-use-mlflow": {
                 "default": False,
-                "help": "Use speculative compilation (student drafts, teacher polishes)",
+                "help": "Enable MLflow tracking for GEPA optimization",
+            },
+            "--gepa-kwargs": {
+                "multiple": True,
+                "help": "Extra GEPA kwargs as key=value (values JSON-parsed)",
             },
         },
     },
@@ -349,6 +432,16 @@ def _register_optimizer_commands():
 @label_option
 @click.option("--auto", default="light", help="Auto mode for MIPRO/GEPA")
 @click.option("--k", default=2, type=int, help="K for KNNFewShot")
+@click.option(
+    "--gepa-kwargs",
+    multiple=True,
+    help="Extra GEPA kwargs as key=value (values JSON-parsed), e.g. --gepa-kwargs max_full_evals=3",
+)
+@click.option(
+    "--use-mlflow/--no-use-mlflow",
+    default=False,
+    help="Enable MLflow tracking for GEPA optimization",
+)
 def compile_submit(
     optimizer: str,
     module_name: str,
@@ -356,6 +449,8 @@ def compile_submit(
     label: str | None,
     auto: str,
     k: int,
+    gepa_kwargs: tuple[str, ...],
+    use_mlflow: bool,
 ):
     """Submit a background compile job. Returns job_id for polling."""
 
@@ -408,7 +503,14 @@ def compile_submit(
         return run_id
 
     def _run_gepa() -> str:
-        opt = dspy.GEPA(metric=gepa_metric, auto=auto, reflection_lm=teacher)
+        gk = _parse_gepa_kwargs(gepa_kwargs)
+        opt = dspy.GEPA(
+            metric=gepa_metric,
+            auto=auto,
+            reflection_lm=teacher,
+            use_mlflow=use_mlflow,
+            gepa_kwargs=gk,
+        )
         # Split valset to avoid GEPA overfitting warning
         val_size = max(3, len(trainset) // 5) if len(trainset) >= 6 else 0
         compile_kwargs = {"student": student}
@@ -438,6 +540,114 @@ def compile_submit(
 
     job_id = CompileScheduler.submit(optimizer, module_name, runners[optimizer], label)
     _log.info("compile_submit", optimizer=optimizer, module=module_name, job_id=job_id)
+    click.echo(f"  Job submitted: {job_id}")
+    click.echo(f"  Check status: dspytools compile status {job_id}")
+
+
+@compile_cmd.command(name="flex", cls=LLMCommand)
+@click.argument("module_name")
+@click.argument("trainset_path")
+@label_option
+@click.option("--auto", default="light", help="Auto mode for GEPA (light/medium/heavy)")
+@click.option(
+    "--tools",
+    "-t",
+    multiple=True,
+    help="Tools as server:tool_name or module.attr (e.g. math.sqrt)",
+)
+@click.option(
+    "--max-predictor-calls",
+    default=100,
+    type=int,
+    help="Cap predictor calls per Flex forward (None = unlimited)",
+)
+@click.option(
+    "--use-mlflow/--no-use-mlflow",
+    default=False,
+    help="Enable MLflow tracking for GEPA optimization",
+)
+def compile_flex(
+    module_name: str,
+    trainset_path: str,
+    label: str | None,
+    auto: str,
+    tools: tuple[str, ...],
+    max_predictor_calls: int,
+    use_mlflow: bool,
+):
+    """Optimize a module's implementation code with dspy.Flex + GEPA.
+
+    Wraps the module in a dspy.Flex program (implementation source code is
+    the optimizable unit) and runs GEPA with a cost-aware metric that
+    penalizes excessive LM calls via the program_trace parameter. The
+    optimized program is saved with module_type='flex' for hot-swap loading.
+
+    \b
+    Examples:
+        dspytools compile flex my_module trainset.jsonl --auto light
+        dspytools compile flex my_module trainset.jsonl -t math.sqrt
+        dspytools compile flex my_module trainset.jsonl --use-mlflow
+    """
+    setup_dspy()
+    teacher = LMRegistry.get_teacher()
+    if teacher is None:
+        click.echo("  No teacher LM configured", err=True)
+        raise click.Abort()
+
+    student = load_module_by_name(module_name)
+    trainset = load_trainset(trainset_path)
+
+    # Derive the Flex signature from the module's signature fields
+    sig = getattr(student, "signature", None)
+    sig_inputs = list(getattr(sig, "input_fields", {}).keys()) or ["input"]
+    sig_outputs = list(getattr(sig, "output_fields", {}).keys()) or ["output"]
+    sig_str = f"{', '.join(sig_inputs)} -> {', '.join(sig_outputs)}"
+
+    from dspytools.commands.run import _load_tools
+
+    dspy_tools = _load_tools(tools)
+
+    def _run_flex() -> str:
+        if dspy_tools:
+            prog = dspy.Flex(
+                sig_str,
+                tools=dspy_tools,
+                max_predictor_calls=max_predictor_calls,
+            )
+        else:
+            prog = dspy.Flex(sig_str, max_predictor_calls=max_predictor_calls)
+
+        opt = dspy.GEPA(
+            metric=gepa_metric_cost_aware(),
+            auto=auto,
+            reflection_lm=teacher,
+            use_mlflow=use_mlflow,
+        )
+        # Split valset to avoid GEPA overfitting warning
+        val_size = max(3, len(trainset) // 5) if len(trainset) >= 6 else 0
+        compile_kwargs = {"student": prog}
+        if val_size > 0:
+            compile_kwargs["valset"] = trainset[-val_size:]
+            compile_kwargs["trainset"] = trainset[:-val_size]
+        else:
+            compile_kwargs["trainset"] = trainset
+        compiled = opt.compile(**compile_kwargs)
+        run_id, run_path = create_run_dir("gepa-flex", label)
+        save_program(
+            run_path,
+            compiled,
+            {"inputs": sig_inputs, "outputs": sig_outputs},
+            module_type="flex",
+        )
+        register_run_with_graph(
+            run_id,
+            {"optimizer": "gepa-flex", "module": module_name, "auto": auto},
+            optimizer="gepa",
+        )
+        return run_id
+
+    job_id = CompileScheduler.submit("gepa-flex", module_name, _run_flex, label)
+    _log.info("compile_flex", optimizer="gepa-flex", module=module_name, job_id=job_id)
     click.echo(f"  Job submitted: {job_id}")
     click.echo(f"  Check status: dspytools compile status {job_id}")
 
@@ -807,6 +1017,32 @@ def compile_gfl(
         )
         click.echo(f"  Baseline: {result['baseline']:.4f}")
         click.echo(f"  Improvement: {result['improvement']:+.4f}")
+
+        # Cost/quality view: estimated $ and $/score per optimizer. Surfaces
+        # the cost-aware tradeoff so users can pick a cheaper optimizer when
+        # scores are near-equal (Pareto-style lens on the comparison).
+        click.echo("\n  Cost / quality (estimated):")
+        cost_rows = []
+        for name, score in sorted(
+            result["all_scores"].items(), key=lambda kv: kv[1], reverse=True
+        ):
+            _, est_cost = _estimate_optimizer_cost(name, len(trainset))
+            dollars_per_score = est_cost / score if score > 0 else float("inf")
+            cost_rows.append(
+                [
+                    name,
+                    f"{score:.4f}",
+                    f"${est_cost:.4f}",
+                    f"${dollars_per_score:.4f}"
+                    if dollars_per_score != float("inf")
+                    else "—",
+                ]
+            )
+        table(
+            "Optimizer cost/quality",
+            ["Optimizer", "Score", "Est. $", "$/score"],
+            cost_rows,
+        )
         if result.get("trend"):
             trend = result["trend"]
             if isinstance(trend, (int, float)):

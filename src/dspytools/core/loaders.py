@@ -54,6 +54,24 @@ def prediction_to_dict(pred) -> dict:
     return {"output": str(pred)}
 
 
+def prediction_output(pred, field: str | None = None) -> object:
+    """Extract a prediction's primary output field. SSOT for single-field extraction.
+
+    Tries ``field`` (if given), then the conventional DSPy output field names
+    ``"answer"`` / ``"output"``, then falls back to ``str(pred)``. Used by metric
+    factories and anywhere a prediction's scalar result is needed — replaces the
+    ad-hoc ``getattr(pred, "answer", getattr(pred, "output", str(pred)))`` chains
+    that previously duplicated this logic across the codebase.
+    """
+    candidates = [field] if field else []
+    candidates += [f for f in ("answer", "output") if f not in candidates]
+    for name in candidates:
+        val = getattr(pred, name, None)
+        if val is not None and val != "":
+            return val
+    return str(pred)
+
+
 def _load_json_array(text: str) -> list[dict]:
     """Parse a JSON array string into list of dicts."""
     return _json.loads(text)

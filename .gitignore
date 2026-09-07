@@ -65,6 +65,8 @@ qa_synthetic.json
 # MLflow / Experiment tracking
 mlflow.db
 mlruns/
+.mlflow/
+.mlartifacts/
 
 # OpenCode IDE config
 .opencode/node_modules/
@@ -72,6 +74,7 @@ mlruns/
 .opencode/opencode-rag.log
 .opencode/package.json
 .opencode/package-lock.json
+.opencode/images/
 
 # Runtime artifacts
 .mlflow.log

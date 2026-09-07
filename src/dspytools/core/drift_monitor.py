@@ -13,6 +13,9 @@ from pathlib import Path
 
 from dspytools.config.settings import drift_state_path
 from dspytools.core._io import read_json, write_json
+from dspytools.core.logging_config import get_logger
+
+_log = get_logger(__name__)
 
 
 @dataclass
@@ -285,12 +288,30 @@ class DriftMonitor:
             self.update_baseline(new_run_id, new_score)
             self.clear_recompile_request(run_id)
 
+            # Close the loop: hot-swap the freshly compiled program into active
+            # service so the improved version actually serves inference instead
+            # of the degraded one. Soft-guarded — a swap failure is logged, not
+            # fatal (the run is already persisted and registered).
+            try:
+                from dspytools.core.hotswap import HotSwapManager
+
+                mgr = HotSwapManager()
+                mgr.load_single(new_run_id)
+                mgr.swap(new_run_id)
+                swap_action = f"swapped active → {new_run_id}"
+            except Exception as e:  # noqa: BLE001 — swap is best-effort
+                _log.warning("drift_fix_swap_failed", run_id=run_id, error=str(e))
+                swap_action = f"recompiled but swap failed ({e})"
+
             results.append(
                 {
                     "run_id": run_id,
                     "new_run_id": new_run_id,
                     "status": "recompiled",
-                    "action": f"Recompiled with {suggested} (score: {new_score:.4f})",
+                    "action": (
+                        f"Recompiled with {suggested} (score: {new_score:.4f}); "
+                        f"{swap_action}"
+                    ),
                 }
             )
 

@@ -312,11 +312,21 @@ def self_ucb_reset():
     "--alert-url", envvar="DSPYTOOLS_ALERT_URL", help="Webhook URL for drift alerts"
 )
 @click.option("--once", is_flag=True, help="Single check instead of daemon loop")
-def self_watch(interval: int, alert_url: str | None, once: bool):
+@click.option(
+    "--auto-fix",
+    is_flag=True,
+    help="Close the loop: recompile degraded programs and hot-swap them active",
+)
+def self_watch(interval: int, alert_url: str | None, once: bool, auto_fix: bool):
     """Monitor programs for quality drift with optional webhook alerts.
 
     Runs continuously (like a daemon) checking all tracked programs
     for quality degradation. Can send webhook alerts on critical drift.
+
+    With ``--auto-fix`` the loop is fully autonomous: on critical drift it
+    recompiles the degraded program (draft for minor drift, full for major),
+    validates via the holdout SPRT gate, and hot-swaps the improved program
+    into active service — no human intervention required.
 
     \b
     Examples:
@@ -344,6 +354,7 @@ def self_watch(interval: int, alert_url: str | None, once: bool):
             "warnings": 0,
             "criticals": 0,
             "alerts": [],
+            "fixed": [],
         }
         # Use public API instead of private _baselines
         tracked = monitor.status.get("programs", {})
@@ -365,6 +376,23 @@ def self_watch(interval: int, alert_url: str | None, once: bool):
                         summary["criticals"] += 1
                         monitor.request_recompile(alert.run_id)
             summary["checked"] += 1
+
+        # Autonomous mode: process queued recompiles + hot-swap fixed programs.
+        if auto_fix and monitor.pending_recompiles():
+            info(
+                f"Auto-fixing {len(monitor.pending_recompiles())} degraded program(s)..."
+            )
+            results = monitor.process_recompile_requests(auto_fix=True)
+            summary["fixed"] = [
+                {"run_id": r.get("run_id"), "action": r.get("action")}
+                for r in results
+                if r.get("status") == "recompiled"
+            ]
+            for r in results:
+                if r.get("status") == "recompiled":
+                    ok(f"  {r['run_id']} → {r['new_run_id']}: {r['action']}")
+                else:
+                    warn(f"  {r.get('run_id')}: {r.get('action')}")
         return summary
 
     def _send_webhook(url: str, payload: bytes) -> bool:
@@ -389,10 +417,15 @@ def self_watch(interval: int, alert_url: str | None, once: bool):
                 warn(f"  CRITICAL: {alert['message']}")
             else:
                 info(f"  WARNING: {alert['message']}")
+        if auto_fix and summary["fixed"]:
+            ok(
+                f"Auto-fixed {len(summary['fixed'])} program(s) and hot-swapped them active"
+            )
         return
 
     # Continuous monitoring loop
-    info(f"Starting drift watch (interval={interval}s)")
+    mode = "autonomous (auto-fix on)" if auto_fix else "monitor-only"
+    info(f"Starting drift watch (interval={interval}s, mode={mode})")
     if alert_url:
         info(f"Webhook alerts to: {alert_url}")
 
@@ -407,6 +440,8 @@ def self_watch(interval: int, alert_url: str | None, once: bool):
                 if alert_url:
                     payload = _json.dumps(summary).encode()
                     _send_webhook(alert_url, payload)
+            elif summary["fixed"]:
+                ok(f"Auto-fixed {len(summary['fixed'])} degraded program(s)")
             else:
                 ok(f"All {summary['checked']} program(s) healthy")
 

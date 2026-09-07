@@ -34,7 +34,7 @@ The skills directory implements the Agent Skills system — a BM25-indexed libra
   - Saves compiled program to `{skill_dir}/program.json` and signature metadata to `signature.json`
   - Returns `{error: ...}` dict if skill not found
   - With no trainset, saves the unoptimized base program
-- `SkillManager.auto_optimize_skill(name)` → `{status, skill, best, score}` or `{error: ...}`
+- `SkillManager.auto_optimize_skill(name, trainset=None)` → `{status, skill, best, score}` or `{error: ...}`
   - Uses `GFLPipeline` from `dspytools.gfl.pipeline` for full 4-way optimizer comparison
   - Loads existing compiled program, runs GFL pipeline, saves best result back to `program.json`
   - Requires skill to have a compiled program already

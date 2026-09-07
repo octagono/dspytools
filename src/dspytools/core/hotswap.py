@@ -29,6 +29,7 @@ import numpy as np
 from dspytools.config.settings import compiled_dir
 from dspytools.core._io import read_json
 from dspytools.core.drift_monitor import get_drift_monitor
+from dspytools.core.errors import ServiceUnavailableError
 from dspytools.core.loaders import prediction_to_dict
 from dspytools.core.metrics import auto_metric
 from dspytools.graph.cache import get_semantic_cache
@@ -127,6 +128,8 @@ def _load_program_from_run(run_id: str) -> dspy.Module | None:
         program = dspy.ChainOfThought(real_sig)
     elif module_type == "react":
         program = dspy.ReAct(real_sig, tools=[])
+    elif module_type == "flex":
+        program = dspy.Flex(real_sig)
     else:
         program = dspy.Predict(real_sig)
 
@@ -361,11 +364,24 @@ class HotSwapManager:
         try:
             # Semantic cache check (SSOT: RedisVL)
             # Note: get_semantic_cache() can raise ConnectionError when Redis is
-            # down — must be inside try/except, not before it.
+            # down — must be inside try/except, not before it. A Redis outage
+            # degrades to "cache miss → hit the LM directly", never a crash.
             cache_key = json.dumps(inputs, sort_keys=True, default=str)
-            cache = self._cache or get_semantic_cache()
-            self._cache = cache
-            cached = cache.check(cache_key)
+            try:
+                cache = self._cache or get_semantic_cache()
+                self._cache = cache
+            except (ServiceUnavailableError, ConnectionError, OSError) as e:
+                _log.warning("semantic_cache_unavailable", error=str(e))
+                cache = None
+                self._cache = None
+
+            try:
+                cached = cache.check(cache_key) if cache else None
+            except (ServiceUnavailableError, ConnectionError, OSError) as e:
+                _log.warning("semantic_cache_check_failed", error=str(e))
+                cache = None
+                self._cache = None
+                cached = None
             if cached:
                 response = cached.get("response", {})
                 if isinstance(response, str):
@@ -384,14 +400,21 @@ class HotSwapManager:
             result = prog(**inputs)
             output = prediction_to_dict(result)
 
-            # Semantic cache store (SSOT)
+            # Semantic cache store (SSOT) — degrade to no-op when Redis is down
             if cache:
-                # Convert ndarray values to lists for JSON serialization
-                serializable = {
-                    k: v.tolist() if isinstance(v, np.ndarray) else v
-                    for k, v in output.items()
-                }
-                cache.store(cache_key, json.dumps(serializable), _vector=cache_vector)
+                try:
+                    # Convert ndarray values to lists for JSON serialization
+                    serializable = {
+                        k: v.tolist() if isinstance(v, np.ndarray) else v
+                        for k, v in output.items()
+                    }
+                    cache.store(
+                        cache_key, json.dumps(serializable), _vector=cache_vector
+                    )
+                except (ServiceUnavailableError, ConnectionError, OSError) as e:
+                    _log.warning("semantic_cache_store_failed", error=str(e))
+                    cache = None
+                    self._cache = None
 
             # Stochastic scoring: only evaluate 1-in-10 inferences
             # (drift monitoring only needs statistical signal, not every sample)
@@ -421,7 +444,10 @@ class HotSwapManager:
                     )
                     # Dynamic cache tuning: tighten threshold on drift
                     if cache:
-                        cache.adjust_threshold(alert.degradation_pct / 100)
+                        try:
+                            cache.adjust_threshold(alert.degradation_pct / 100)
+                        except (ServiceUnavailableError, ConnectionError, OSError):
+                            pass  # cache already unavailable — skip tuning
 
             return output
         finally:

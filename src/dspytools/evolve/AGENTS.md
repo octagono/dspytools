@@ -40,6 +40,7 @@ This doc owns all files in `src/dspytools/evolve/` including the `layers/` subdi
 
 - `SelfEvolve(quality_threshold=0.5)` — default threshold for triggering re-optimization.
 - `auto_optimize() → dict` — monitors quality via `RouterAgent.evolve()`. Returns `{"should_recompile": bool, "action": str, "average_score": float, "message": str}`. When `should_recompile` is `True`, sets `action` to `"recompile_needed"`.
+- `_hotswap_program(program) → None` — persists a newly compiled program to a run directory (`create_run_dir` + `save_program` with inferred `module_type`), registers it in the run index (`register_run_with_graph`), and swaps it in as the active program. Inferred `module_type`: Flex→`"flex"`, ReAct→`"react"`, ChainOfThought→`"cot"`, else `"predict"`.
 - `ask(question: str) → dict` — routes query through `RouterAgent.ask()`. Returns `{"answer": str, "score": float, "active_program": str, "needs_optimization": bool}`.
 - `status → dict` — delegates to `RouterAgent.status`.
 - `get_router() → RouterAgent` — module-level singleton. `_router` is `None` until first call.
@@ -175,7 +176,7 @@ Load methods are **fail-fast** — corrupted state files raise immediately inste
 - Router tools return JSON strings — callers must `json.loads()` the result. Error states return `{"error": str}` format.
 - `auto_metric` is intentionally heuristic and rule-based. Do not add learned scoring here — that belongs in the GFL pipeline.
 - Quality thresholds: `score < 0.4` in `ask()` triggers `needs_optimization` flag; `avg_score < 0.5` in `evolve()` triggers `should_recompile`. These are separate thresholds for different purposes.
-- `_quality_history` is in-memory only — lost on process restart. For persistence, route through `core/registry.py` or GFL's `QualityMonitor`.
+- `_quality_history` is in-memory only — lost on process restart. For persistence, route through `core/registry.py` or the GFL `GFLLoop` monitor (which records scores into the engine's convergence tracker).
 - When adding new persistent state in `self_evolve.py`, follow the pattern: `DATA_PATH` class attribute, `_load()`/`save()` methods, silent error handling on load.
 - UCB exploration constant `c=2.0` encourages exploration. Decrease for more exploitation-heavy behavior. Tune based on empirical results.
 - Morphology tracker requires `count >= 3` min evidence before recommending a pattern from `best_pattern()`.

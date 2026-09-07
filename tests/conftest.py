@@ -106,6 +106,11 @@ def mock_redis():
         mock_val = patcher.start()
         mock_val.return_value.redis.return_value = r
         mock_val.return_value.graph.return_value = g
+        # cache_breaker() returns a real pass-through breaker so wrapped
+        # operations (breaker.call(fn, ...)) actually invoke fn in tests.
+        mock_val.return_value.cache_breaker.return_value.call.side_effect = (
+            lambda fn, *a, **kw: fn(*a, **kw)
+        )
         return mock_val
 
     patchers = [patch(t) for t in _GC_TARGETS]
@@ -211,3 +216,71 @@ def mock_graph(mock_redis: tuple):
                 "falkordb": falkordb,
                 "redis": mock_redis[0],
             }
+
+
+# ── vcrpy hermetic-LLM infrastructure ──────────────────────────────────────
+#
+# Recorded-LM testing: the @pytest.mark.vcr marker records real LLM HTTP calls
+# to YAML cassettes on first run (VCR_RECORD=1 or missing cassette), then
+# replays them on subsequent runs — deterministic behavior tests with zero
+# live-LM cost in CI.
+#
+# Recording requires a live LM. Point DSPYTOOLS_TEST_LM_URL at any OpenAI-
+# compatible endpoint (default: local llama-cpp on :8080). See
+# tests/test_optimizer_behavior.py for a worked example.
+
+
+@pytest.fixture
+def vcr(vcr_instance):
+    """Return the configured VCR instance for manual use_cassette blocks."""
+    return vcr_instance
+
+
+@pytest.fixture(scope="session")
+def vcr_instance():
+    """Configure a VCR instance that records/replays dspy LM HTTP calls."""
+    import vcr
+
+    cassette_dir = os.path.join(os.path.dirname(__file__), "cassettes")
+    os.makedirs(cassette_dir, exist_ok=True)
+    record_mode = "once"  # record if missing; replay if present
+    if os.environ.get("VCR_RECORD", "0") == "1":
+        record_mode = "all"
+
+    return vcr.VCR(
+        serializer="yaml",
+        cassette_library_dir=cassette_dir,
+        record_mode=record_mode,
+        match_on=["method", "scheme", "host", "port", "path", "query", "body"],
+        # Never record/leak the API key; strip volatile headers.
+        filter_headers=["authorization", "x-api-key", "user-agent"],
+        filter_post_data_parameters=["api_key"],
+        before_record_request=lambda r: r,
+    )
+
+
+@pytest.fixture
+def student_lm():
+    """A dspy.LM pointed at the local student model (or overridable endpoint).
+
+    Returns None when no local LM is reachable — tests that require a live LM
+    should ``pytest.skip`` on None so the suite still passes headless.
+    """
+    from dspytools.core._dspy import dspy
+
+    base = os.environ.get("DSPYTOOLS_TEST_LM_URL", "http://127.0.0.1:8080/v1")
+    model = os.environ.get("DSPYTOOLS_TEST_LM_MODEL", "unsloth/Qwen3.5-9B-GGUF")
+    try:
+        lm = dspy.LM(
+            f"openai/{model}",
+            api_base=base,
+            api_key=os.environ.get("DSPYTOOLS_TEST_LM_KEY", "not-needed"),
+            cache=False,
+            temperature=0.0,
+            # Qwen3.5-9B fills reasoning_content before the answer field, so
+            # a small budget truncates before the output field is emitted.
+            max_tokens=4096,
+        )
+        return lm
+    except Exception:
+        return None

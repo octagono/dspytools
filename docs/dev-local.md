@@ -5,8 +5,8 @@
 | # | Service | Port | Purpose |
 |---|---------|------|---------|
 | 1 | FalkorDB | 6379 | Graph database (skills, memory, lineage) + Redis cache |
-| 2 | LLM Server | 8000 | LLM inference endpoint (configurable) |
-| 3 | Embedding | 11434 | embeddinggemma (768-dim) |
+| 2 | LLM Server | 8080 | LM inference endpoint (llama-cpp-server, configurable) |
+| 3 | Embedding | 8001 | embedding server (`DSPYTOOLS_EMBEDDING_URL`, configurable) |
 | 4 | MLflow | 5000 | Experiment tracking (file store at `$PROJECT_ROOT/.mlflow`) |
 | 5 | FastAPI | 8080 | Hot-swap inference server |
 | 6 | MCP SSE | 8002 | MCP server for agent connections |
@@ -41,12 +41,11 @@ Podman container running `falkordb/falkordb:latest` on port 6379.
 Provides graph queries (Cypher), vector search, and response caching.
 
 ### LLM Server
-The LLM server runs on port 8000. Configure the endpoint via `DSPYTOOLS_LLM_URL` environment variable.
-Models are served by llama-cpp-server (default on port 8080).
+The LLM server runs on llama-cpp-server (default on port 8080). Configure the endpoint via `DSPYTOOLS_LLAMA_CPP_URL` environment variable.
 
 ### Embedding Server
-Runs on port 8001. Configure via `DSPYTOOLS_EMBEDDING_URL`.
-Default model: `embeddinggemma` (768-dim).
+Runs on port 8001 by default. Configure via `DSPYTOOLS_EMBEDDING_URL` and `DSPYTOOLS_EMBEDDING_MODEL`.
+Default model: `embeddinggemma` (768-dim); dimension overridable via `DSPYTOOLS_EMBEDDING_DIM`.
 
 ### MLflow
 File-based tracking at `$PROJECT_ROOT/.mlflow`. Web UI on port 5000.

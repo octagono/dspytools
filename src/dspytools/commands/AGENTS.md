@@ -30,9 +30,9 @@ Each file owns its command group. No file-level cross-dependencies — commands 
 
 | File | Group | Scope |
 |------|-------|-------|
-| `agent.py` | `agent` | ReAct agent management — create, list, run agents |
+| `agent.py` | `agent` | ReAct agent management — create, list, run agents. `agent run` accepts `--agent-type {react,react-v2}` (default `react`; `react-v2` uses native tool calling via `dspy.ReActV2`) |
 | `compare.py` | `compare` | A/B program comparison — side-by-side evaluation with bootstrap p-value significance |
-| `compile.py` | `compile` | OptimizerRegistry factory generates 10 commands from `_OPTIMIZER_SPECS` (knn, mipro, gepa, copro, simba, bootstrap-few-shot/{random,optuna}, labeled-few-shot, infer-rules). 12 explicit commands: submit/status/list/cancel (async), cost (cost/lineage lookup + per-optimizer savings), better-together, ensemble, finetune, gfl (--halving, --auto-suggest, --validate, --optimizers), grpo, avatar, distill (multi-step/teacher-dependent). |
+| `compile.py` | `compile` | OptimizerRegistry factory generates 10 commands from `_OPTIMIZER_SPECS` (knn, mipro, gepa, copro, simba, bootstrap-few-shot/{random,optuna}, labeled-few-shot, infer-rules). 12 explicit commands: submit/status/list/cancel (async), cost (cost/lineage lookup + per-optimizer savings), better-together, ensemble, finetune, gfl (--halving, --auto-suggest, --validate, --optimizers), grpo, avatar, distill (multi-step/teacher-dependent). New: `flex` (async) — wraps a module in `dspy.Flex` + GEPA with `gepa_metric_cost_aware`; saves `module_type="flex"` for hotswap. GEPA paths expose `--gepa-kwargs` (key=value, JSON-parsed, shared `_parse_gepa_kwargs` helper) and `--use-mlflow`. `--gepa-kwargs` rejects `max_reflection_cost` / `reflection_prompt_template` with a clear CLI error (DSPy 3.3.1 `dspy.GEPA` raises ValueError on both). The `gfl` comparison output includes a **cost/quality table** (per-optimizer est. $ and $/score via the shared `_estimate_optimizer_cost` helper — token multipliers × dataset size × DeepSeek pricing from `core.cost_tracker`). |
 | `configure.py` | `configure` | API key management (secure hidden-prompt input, --stdin pipe mode), LM registry (student/teacher), adapter selection, DSPy runtime settings, cache control, shell completion (install/uninstall/status/show) |
 | `data.py` | `data` | Dataset management — list, import, export, inspect datasets |
 | `distill.py` | `distill` | LoRA distillation pipeline — run, list-frameworks, stats, prepare-colab, check (dependency verification) |
@@ -40,16 +40,16 @@ Each file owns its command group. No file-level cross-dependencies — commands 
 | `evaluate.py` | `evaluate` | Evaluation pipeline — run metrics against compiled programs on devsets |
 | `export.py` | `export` | Program export/packaging — list, package, info subcommands |
 | `generate.py` | `generate` | llms.txt generation — `llms-txt`, `batch`, `explore`, `warmup` (pre-seed analysis cache with known URL patterns) subcommands |
-| `gfl.py` | `gfl` | GFL pipeline commands — status, synthesize, meta-optimize, decompose, ab-test, consolidate, spin, lse, gepa |
+| `gfl.py` | `gfl` | GFL pipeline commands — loop, status, synthesize, meta-optimize, decompose, ab-test, consolidate, spin, lse, gepa, opsd |
 | `graph.py` | `graph` | FalkorDB graph management — status, query, migrate, benchmark (p50/p95/p99 latency), cascade (BFS drift→recompile with --dry-run/--no-dry-run) |
 | `inspect.py` | `inspect` | Program inspection — load and display compiled program structure |
 | `lora.py` | `lora` | LoRA adapter management — load, unload, list, chat, test, health, discover, extract, evaluate (bootstrap p-value CI with auto drift registration), train |
 | `mcp.py` | `mcp` | MCP server management — start/stop/status of MCP tool servers |
 | `memory.py` | `memory` | FalkorDB-native persistent memory — add, search, get-all, delete subcommands |
-| `module.py` | `module` | DSPy module CRUD — new, list, show, call, delete |
+| `module.py` | `module` | DSPy module CRUD — new, list, show, call, delete. `module new --type` supports Predict/ChainOfThought/ReActV2/MultiChainComparison/Tool/Generate/Flex |
 | `pipeline.py` | `pipeline` | Multi-module pipeline composition — compose, list, run subcommands |
-| `run.py` | `run` | Hot-swap inference runner — run compiled programs with live module reload |
-| `self.py` | `self` | Auto-evolve commands — self-optimization, router management, drift→recompile cascade (auto-fix), UCB exploration status/reset, watch daemon (--interval --alert-url), distill auto-evaluate with rollback |
+| `run.py` | `run` | Hot-swap inference runner — run compiled programs with live module reload. Subcommands include `react-v2`, `flex` (dspy.Flex execution with optional tools), `rlm`, and the legacy-named `pot`/`code-act` (now RLM-backed: `dspy.CodeAct`/`dspy.ProgramOfThought` were deprecated in DSPy 3.3.1, removal in 3.5 — both execute on `dspy.RLM`) |
+| `self.py` | `self` | Auto-evolve commands — self-optimization, router management, drift→recompile cascade (auto-fix), UCB exploration status/reset, watch daemon (--interval --alert-url, --auto-fix for autonomous recompile+hot-swap), distill auto-evaluate with rollback |
 | `server.py` | `server` | Hot-swap server — start/stop/status the FastAPI inference server |
 | `signature.py` | `signature` | DSPy signature CRUD — new, list, show, edit, delete |
 | `skills.py` | `skills` | Skills system — list, install, create, export, ecosystem search (find/discover/categories) |

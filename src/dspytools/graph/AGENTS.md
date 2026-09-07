@@ -17,10 +17,12 @@ FalkorDB + Redis graph database integration for dspytools. Provides O(1) graph t
 
 ### `client.py` — GraphClient singleton
 
+- `CircuitBreaker` — thread-safe circuit breaker (`closed` → `open` after `failure_threshold` consecutive failures → `half-open` probe after `cooldown_seconds`). Wraps external-service calls via `breaker.call(fn, ...)`; raises the typed error (`GraphError` for FalkorDB, `CacheError` for Redis) when open or on connection failure. Successes reset the circuit.
 - `GraphClient()` — singleton via `__new__`, lazy FalkorDB + Redis initialization (no `@lru_cache` wrapper needed since `__new__` already ensures singleton).
-- `graph(name)` — returns FalkorDB graph for Cypher queries
-- `redis()` — returns Redis client for vector search and caching
-- `ping()` — checks connection health
+- `graph(name)` — returns FalkorDB graph for Cypher queries. Client acquisition and `select_graph` are breaker-guarded → raise `GraphError` when FalkorDB is down or the circuit is open.
+- `redis()` — returns the raw Redis client (lazy-connecting). Redis operations should be wrapped by consumers via `cache_breaker().call(fn, ...)` so a down Redis raises typed `CacheError`.
+- `cache_breaker()` — returns the shared `CacheError` circuit breaker for Redis-backed cache operations.
+- `ping()` — breaker-routed health check; raises `GraphError`/`CacheError` when the service is down or the circuit is open.
 - `ensure_indexes()` — creates FalkorDB native vector indexes for semantic search:
   - Vector index on `Skill.embedding` (default graph)
   - Vector index on `CacheVec.embedding` (`llm_cache` graph, for `SemanticCache`)
@@ -29,7 +31,13 @@ FalkorDB + Redis graph database integration for dspytools. Provides O(1) graph t
   - Dimension from `embedder_dimension()` (env `DSPYTOOLS_EMBEDDING_DIM`, default 768 for embeddinggemma)
 - `ensure_vector_index(graph_name, label, property, dim)` — creates a FalkorDB vector index idempotently. FalkorDB lacks `CREATE VECTOR INDEX IF NOT EXISTS`, so catches "already indexed" error and ignores it. All other errors propagate.
 - `flush_all()` — flushes all data (use with caution)
-- `_load_config()` — reads FalkorDB connection from ConfigCache (`falkordb.host`, `falkordb.port`, `falkordb.password`)
+- `_load_config()` — reads FalkorDB connection from ConfigCache (`falkordb.host`, `falkordb.port`, `falkordb.password`, `falkordb.db`, `falkordb.database`); defaults to `localhost:6379` / graph name `dspytools`.
+
+### Graceful degradation contract
+
+- **Inference hot path** (`HotSwapManager.infer`): the semantic cache is an optimization, not a requirement. A Redis outage degrades to "cache miss → hit the LM directly" — `infer()` catches `ServiceUnavailableError`/`ConnectionError` around cache init, `check`, `store`, and `adjust_threshold`, logs `semantic_cache_unavailable`, and proceeds. Never crashes a request.
+- **Explicit graph/cache commands** (`dspytools graph *`, `memory *`): raise typed `GraphError`/`CacheError` (subclasses of `ServiceUnavailableError`) so callers can catch and report cleanly — they do not silently return empty data.
+- **`SemanticCache`** (`cache.py`) routes Redis/FalkorDB operations through the shared `cache_breaker()` → typed `CacheError` on outage. Consumers that can degrade catch it; consumers that must surface it receive a clean typed error.
 
 ### `skill_graph.py` — FalkorDBSkillGraph
 
@@ -85,7 +93,7 @@ FalkorDB + Redis graph database integration for dspytools. Provides O(1) graph t
 - Semantic cache uses cosine similarity with configurable distance threshold
 - `RedisCache` namespaces prevent key collisions between MCP, compile, and graph data
 - MCP tool cache (5s TTL) is Redis-backed — persists across MCP server restarts
-- CircuitBreaker wraps FalkorDB/Redis connection calls — service down doesn't crash the process
+- `CircuitBreaker` wraps FalkorDB/Redis connection calls (`graph()`, `cache_breaker().call()`) — see the Graceful degradation contract above. Service down does not crash the process on the inference hot path; explicit graph commands surface typed `GraphError`/`CacheError`.
 
 ## Verification
 

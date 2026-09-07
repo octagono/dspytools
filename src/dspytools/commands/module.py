@@ -44,6 +44,7 @@ def module_cmd():
             "MultiChainComparison",
             "Tool",
             "Generate",
+            "Flex",
         ]
     ),
     help="Module type (default: Predict)",

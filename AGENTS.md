@@ -71,7 +71,7 @@ dspytools/
 ├── evolve/    → Self-evolving agent system + harness layers
 ├── graph/     → FalkorDB graph database + RedisVL semantic cache, cache_mojo_bridge, benchmark
 ├── memory/    → FalkorDB-native persistent memory layer
-├── mcp/       → MCP server (65 tools, 9 resources, 3 prompts)
+├── mcp/       → MCP server (65 tools, 8 resources, 3 prompts)
 ├── skills/    → Skills library (BM25 + embedding, bm25_mojo_bridge)
 ├── help/      → Self-optimizing --help
 ├── api/       → FastAPI server
@@ -97,7 +97,7 @@ dspytools/
 
 ## Child DOX Index
 
-Root governs the dspytools project — DSPy 3.3.0b1 examples running on Qwen3.5-9B via llama-cpp-server with MCP-git agentic tools. Thirteen child AGENTS.md files in `src/dspytools/*/`:
+Root governs the dspytools project — DSPy 3.3.1 examples running on Qwen3.5-9B via llama-cpp-server with MCP-git agentic tools (dspy-ai==3.3.1 pin; Flex, ReActV2, RLM, GEPA cost-aware optimization supported). Thirteen child AGENTS.md files in `src/dspytools/*/`:
 
 | Directory | Scope |
 |-----------|-------|
@@ -118,9 +118,9 @@ Root governs the dspytools project — DSPy 3.3.0b1 examples running on Qwen3.5-
 ## Quick Commands
 
 ```bash
-pytest tests/ -q              # 360 smoke tests, 5s (no LLM needed)
+pytest tests/ -q              # 363 tests, ~6s (no live LLM needed; 4 recorded-LM behavior tests replay cassettes)
 ruff check                     # zero errors required
-dspytools --help               # explore all 24 commands (0.18s cold start)
+dspytools --help               # explore all 24 commands
 dspytools self auto-fix         # inspect and fix drift-degraded programs
 ./scripts/ci-local.sh          # full 5-stage CI pipeline on local GPU
 ./scripts/ci-local.sh --stage 1  # lint + smoke tests only

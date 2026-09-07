@@ -362,6 +362,41 @@ def setup_dspy(
                 if _m:
                     parsed = _json_repair.loads(_m.group(0))
             if not isinstance(parsed, dict):
+                # BAMLAdapter renders output fields as a `[[ ## field ## ]]`
+                # section template (see format_field_structure) and small local
+                # models (Qwen) often echo that template back verbatim instead
+                # of emitting a JSON object.  JSONAdapter.parse() can't handle
+                # it, so fall back to ChatAdapter-style section parsing, which
+                # extracts `[[ ## field ## ]]` sections by header.
+                _chat_fields: dict[str, str] = {}
+                _header_re = _regex.compile(r"\[\[ ## (\w+) ## \]\]")
+                _section = None
+                _buf: list[str] = []
+                for _line in completion.splitlines():
+                    _mh = _header_re.match(_line.strip())
+                    if _mh:
+                        if _section is not None and _section in signature.output_fields:
+                            _chat_fields[_section] = "\n".join(_buf).strip()
+                        _section = _mh.group(1)
+                        _buf = []
+                        _rest = _line[_mh.end() :].strip()
+                        if _rest:
+                            _buf.append(_rest)
+                    else:
+                        _buf.append(_line)
+                if _section is not None and _section in signature.output_fields:
+                    _chat_fields[_section] = "\n".join(_buf).strip()
+                if _chat_fields:
+                    parsed = {}
+                    for _k, _v in _chat_fields.items():
+                        if _k in signature.output_fields:
+                            try:
+                                parsed[_k] = parse_value(
+                                    _v, signature.output_fields[_k].annotation
+                                )
+                            except Exception:
+                                parsed[_k] = _v
+            if not isinstance(parsed, dict):
                 raise AdapterParseError(
                     adapter_name="JSONAdapter",
                     signature=signature,
@@ -373,6 +408,22 @@ def setup_dspy(
             for k, v in parsed.items():
                 if k in signature.output_fields:
                     parsed[k] = parse_value(v, signature.output_fields[k].annotation)
+
+            # DSPy 3.3.1: stock JSONAdapter.parse ends with
+            # apply_output_field_defaults(), which fills any omitted optional
+            # output field (declared default / default factory / None-allowing
+            # annotation). Our override must keep that behavior so defaulted or
+            # nullable non-Reasoning fields no longer raise when the model omits
+            # them — matching stock semantics before the strict check below.
+            # Feature-detected: if the helper moves/renames in a future DSPy,
+            # degrade gracefully (skip default-filling) instead of hard-crashing
+            # setup on an unexpected version.
+            try:
+                from dspy.adapters.utils import apply_output_field_defaults
+            except ImportError:
+                apply_output_field_defaults = None
+            if apply_output_field_defaults is not None:
+                parsed = apply_output_field_defaults(signature, parsed)
 
             # Reasoning fields may be absent — populated from reasoning_content
             # or defaulted in _call_postprocess. Other fields must all be present.
@@ -403,19 +454,21 @@ def setup_dspy(
     cfg = load_config()
     adapter_type = cfg.get("dspy", {}).get("adapter", "baml")
 
-    adapters = {}
     # Always lazily import to avoid startup cost; BAMLAdapter is already imported
     # via the patch above, so reuse its module reference.
     from dspy.adapters.baml_adapter import BAMLAdapter as _BAMLAdapter
 
-    adapters["baml"] = _BAMLAdapter(use_native_function_calling=False)
-
-    if adapter_type != "baml":
-        adapters["chat"] = dspy.ChatAdapter()
-        adapters["json"] = dspy.JSONAdapter()
-        adapters["xml"] = dspy.XMLAdapter()
-
-    adapter = adapters.get(adapter_type) or adapters["baml"]
+    # Build only the selected adapter (not all four) — the others would be
+    # constructed and immediately discarded.
+    if adapter_type == "chat":
+        adapter = dspy.ChatAdapter()
+    elif adapter_type == "json":
+        adapter = dspy.JSONAdapter()
+    elif adapter_type == "xml":
+        adapter = dspy.XMLAdapter()
+    else:
+        # Default (and fallback for unknown/stale values): BAMLAdapter
+        adapter = _BAMLAdapter(use_native_function_calling=False)
 
     try:
         dspy.configure(

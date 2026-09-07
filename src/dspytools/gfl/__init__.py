@@ -3,7 +3,7 @@
 The GFL module implements the full self-meta-learning loop:
   Generate → Evaluate → Keep → Learn → Deploy
 
-CLI: dspytools gfl synthesize|meta-optimize|decompose|ab-test|consolidate|spin|lse|gepa
+CLI: dspytools gfl loop|synthesize|meta-optimize|decompose|ab-test|consolidate|spin|lse|gepa|opsd|status
 """
 
 from __future__ import annotations
@@ -78,28 +78,37 @@ class GFLLoop:
         return self._engine
 
     def run(self, program_id: str, trainset_path: str, max_iterations: int = 3) -> dict:
-        """Run the full GFL loop."""
-        results = {"iterations": [], "final": {}}
+        """Run the full GFL cycle: monitor → synthesize → meta-learn → evaluate.
+
+        Loads the trainset once to drive meta-learning (dataset size) and
+        iterates until quality stabilizes or ``max_iterations`` is reached.
+        """
+        from dspytools.core.loaders import load_trainset
+
+        trainset = load_trainset(trainset_path)
+        dataset_size = len(trainset)
+        results: dict = {"iterations": [], "final": {}}
 
         for i in range(max_iterations):
             iteration = {"iteration": i + 1, "timestamp": datetime.now().isoformat()}
 
-            # 1. Monitor quality
+            # 1. Monitor quality (checks the engine's convergence state)
             iteration["monitor"] = self._monitor(program_id)
 
-            # 2. If regression, synthesize more data
+            # 2. If regression, synthesize more training data
             if iteration["monitor"]["needs_improvement"]:
                 iteration["synthesize"] = self._synthesize(trainset_path, target=10)
 
-            # 3. Meta-optimize: pick best optimizer
-            iteration["meta"] = self._meta_learn(program_id)
+            # 3. Meta-optimize: pick the best optimizer for this dataset size
+            iteration["meta"] = self._meta_learn(program_id, dataset_size)
 
-            # 4. Evaluate result
+            # 4. Evaluate the program's current quality
             iteration["evaluate"] = self._evaluate(program_id)
 
             results["iterations"].append(iteration)
+            self.history.append(iteration)
 
-            # 5. If good enough, stop
+            # 5. If quality is stable, stop
             if not iteration["monitor"]["needs_improvement"]:
                 break
 
@@ -137,15 +146,19 @@ class GFLLoop:
         result = self._data_synth.generate(Path(trainset_path), target_count=target)
         return {"generated": result["generated"], "path": result["output_path"]}
 
-    def _meta_learn(self, program_id: str) -> dict:
-        """Meta-learn best optimizer. Optimization 16: Reuses cached MetaOptimizer."""
+    def _meta_learn(self, program_id: str, dataset_size: int) -> dict:
+        """Meta-learn best optimizer for the given dataset size. Optimization 16."""
 
         if self._meta_optimizer is None:
             self._meta_optimizer = MetaOptimizer()
-        return self._meta_optimizer.select_optimizer(program_id, len(self.history))
+        return self._meta_optimizer.select_optimizer(program_id, dataset_size)
 
     def _evaluate(self, program_id: str) -> dict:
-        """Evaluate a program's quality using registry metadata + auto_metric."""
+        """Evaluate a program's quality using registry metadata + auto_metric.
+
+        Infers the program's input field from its signature.json and feeds the
+        score back into the engine's convergence tracker (record_score).
+        """
 
         # Optimization 29: Reuse HotSwapManager
         if self._hotswap is None:
@@ -168,11 +181,15 @@ class GFLLoop:
 
         if self._hotswap.is_loaded(program_id):
             prog = self._hotswap._programs[program_id]
-            result = prog(question="test")
+            input_field = self._infer_input_field(program_id)
+            result = prog(**{input_field: "test"})
             content = getattr(result, "answer", getattr(result, "output", str(result)))
             score = auto_metric(str(content))
         else:
             score = 0.5  # Can't load, neutral score
+
+        # Feed the score into the convergence tracker so _monitor is meaningful.
+        self._get_engine().record_score(score)
 
         improved = len(self.history) > 0 and score > self.history[-1].get(
             "evaluate", {}
@@ -183,3 +200,20 @@ class GFLLoop:
             "score": score,
             "improved": improved,
         }
+
+    def _infer_input_field(self, program_id: str) -> str:
+        """Infer the program's primary input field from its signature.json.
+
+        Falls back to ``"input"`` when the signature file is missing or empty —
+        matching the SSOT convention used by ``dspytools gfl consolidate``.
+        """
+        from dspytools.config.settings import compiled_dir
+        from dspytools.core._io import read_json
+
+        sig_path = compiled_dir() / program_id / "signature.json"
+        if sig_path.exists():
+            sig_data = read_json(sig_path)
+            inputs = sig_data.get("inputs", ["input"])
+            if inputs:
+                return inputs[0]
+        return "input"

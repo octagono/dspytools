@@ -12,9 +12,9 @@ import time
 from typing import Any
 
 from dspytools import __version__
-from dspytools.cli.llm_help import LLMGroup
 from dspytools.cli.rich_config import click
 from dspytools.core.logging_config import get_logger
+from dspytools.help import HelpManager, SelfOptimizingCLI
 
 _log = get_logger(__name__)
 
@@ -23,10 +23,12 @@ _log = get_logger(__name__)
 _mlflow_tracker_ref = None
 
 
-class LazyGroup(LLMGroup):
+class LazyGroup(SelfOptimizingCLI):
     """Click group that lazily imports subcommand modules.
 
-    Uses LLM-powered help for all --help invocations.
+    Root CLI group: inherits SelfOptimizingCLI so ``dspytools --help``
+    dispatches through the DSPy help system (HelpManager) when a compiled
+    help module exists, falling back to rich-click static help otherwise.
     Only imports command modules when the subcommand is actually invoked.
     """
 
@@ -160,6 +162,11 @@ cli.add_lazy_command("lora", "dspytools.commands.lora", "lora_cmd")
 cli.add_lazy_command("distill", "dspytools.commands.distill", "distill_cmd")
 cli.add_lazy_command("graph", "dspytools.commands.graph", "graph_cmd")
 cli.add_lazy_command("memory", "dspytools.commands.memory", "memory_cmd")
+
+
+# Register the root CLI group with the help system before any help request.
+# SelfOptimizingCLI.get_help also re-inits from ctx.find_root() as a safety net.
+HelpManager.init(cli)
 
 
 # ── MLflow flush on exit ────────────────────────────────────────────────────

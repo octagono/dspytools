@@ -10,6 +10,7 @@ The GFL (Generative Feedback Loop) directory implements the full self-meta-learn
 ## Ownership
 
 - `GFLPipeline` — primary interface for optimizer comparison and single-optimizer mode (compile gfl command, skills manager). Used by `commands/gfl.py` and `skills/manager.py`. Supports `mode="compare"` (4-way, default) or `mode="single"`.
+- `GFLLoop` — full autonomous cycle orchestrator (monitor → synthesize → meta-learn → evaluate) wired to `gfl loop`. Reuses `SelfEvolveEngine`, `MetaOptimizer`, `DataSynthesizer`, and `HotSwapManager` as cached singletons per instance.
 - `LSETracker` — improvement delta tracker, used by pipeline and paper_optimizers. Shared state lives at `~/.config/dspytools/lse_log.json`.
 - `MetaOptimizer` — meta-learner that selects best optimizer by dataset size/complexity. Shared state at `~/.config/dspytools/meta_optimizer.json`.
 - `DataSynthesizer` — auto-generates training examples from seed data. Uses teacher LM for paraphrasing, domain variation, and complexity variation.
@@ -115,6 +116,7 @@ All persistent state lives under `~/.config/dspytools/`:
 - Cost-aware: max 50 evaluations by default, early termination on clear wins (typically ~12 examples)
 
 ### CLI integration
+- `gfl loop` → `GFLLoop.run()` (monitor → synthesize → meta-learn → evaluate, iterates until stable)
 - `gfl synthesize` → `DataSynthesizer.generate()`
 - `gfl meta-optimize` → `MetaOptimizer.select_optimizer()`
 - `gfl decompose` → `TaskDecomposer.decompose()`
@@ -124,9 +126,9 @@ All persistent state lives under `~/.config/dspytools/`:
 - `gfl lse` → `LSETreeExplorer.explore()` (arXiv 2603.18620)
 - `gfl gepa` → `GEPAParetoFrontier.select_next()` (arXiv 2507.19457)
 - `gfl opsd` → `PurifiedOPSDOptimizer.iterate()` (arXiv 2607.02234)
+- `gfl status` → shows LM config + compiled run count + best score
 - `compile gfl` → `GFLPipeline.run()` (4-way comparison), `GFLPipeline.run_halving()` (when `--halving`), or `GFLPipeline.run_single()` when `--single` is specified
 - `compile gepa --draft` → `GFLPipeline.compile_draft()` for speculative compilation
-- `gfl opsd` → `PurifiedOPSDOptimizer.iterate()` (arXiv 2607.02234)
 
 ## Work Guidance
 

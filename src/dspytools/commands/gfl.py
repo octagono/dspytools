@@ -546,6 +546,50 @@ def gfl_gepa(module_name: str, scores: str | None):
     )
 
 
+@gfl_cmd.command(name="loop", cls=LLMCommand)
+@click.argument("program_id")
+@click.argument("trainset_path")
+@click.option(
+    "--max-iterations", "-n", default=3, type=int, help="Max GFL loop iterations"
+)
+def gfl_loop(program_id: str, trainset_path: str, max_iterations: int):
+    """Run the full GFL cycle: monitor → synthesize → meta-learn → evaluate.
+
+    Iterates until quality stabilizes or --max-iterations is reached.
+    """
+    from dspytools.core.setup import setup_dspy
+    from dspytools.gfl import GFLLoop
+
+    setup_dspy()
+    loop = GFLLoop()
+    info(f"Running GFL loop on '{program_id}' (max {max_iterations} iterations)...")
+    result = loop.run(program_id, trainset_path, max_iterations=max_iterations)
+
+    for it in result["iterations"]:
+        ev = it.get("evaluate", {})
+        status = (
+            "stable"
+            if not it.get("monitor", {}).get("needs_improvement")
+            else "improving"
+        )
+        console.print(
+            f"  [bold]iter {it['iteration']}:[/] "
+            f"score={ev.get('score', 0.0):.3f} [{status}]"
+        )
+
+    panel(
+        "GFL Loop Complete",
+        f"[bold]Iterations:[/] {result['final']['iterations_completed']}\n"
+        f"[bold]Final program:[/] {result['final']['final_program']}",
+        border_style="green",
+    )
+    _log.info(
+        "gfl_loop",
+        program_id=program_id,
+        iterations=result["final"]["iterations_completed"],
+    )
+
+
 @gfl_cmd.command(name="status", cls=LLMCommand)
 def gfl_status():
     """Show GFL pipeline status and configuration."""

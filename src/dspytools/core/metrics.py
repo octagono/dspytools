@@ -7,7 +7,9 @@ and _calc_score (gfl/feedback.py) into one canonical implementation.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
+
+from dspytools.core.loaders import prediction_output
 
 
 def exact_match_metric(val_field: str = "output"):
@@ -128,17 +130,52 @@ def gepa_metric(
     val_field: str = "output",
 ) -> float:
     """GEPA-compatible metric — extracts prediction answer, delegates to auto_metric."""
-    output = getattr(
-        pred, val_field, getattr(pred, "answer", getattr(pred, "output", str(pred)))
-    )
+    output = prediction_output(pred, field=val_field)
     return auto_metric(str(output))
+
+
+def gepa_metric_cost_aware(
+    val_field: str = "output", lm_call_penalty: float = 0.01
+) -> Callable[..., float]:
+    """Factory: cost-aware GEPA metric for Flex optimization.
+
+    Enables cost-aware Flex program optimization via GEPA's ``program_trace``
+    parameter (populated at scoring time for Flex submodules). The returned
+    metric scores prediction quality via :func:`auto_metric` and subtracts a
+    penalty for each LM call recorded in ``program_trace``, so GEPA favours
+    programs that achieve the same quality with fewer LM calls.
+
+    The returned callable follows the 6-arg GEPA metric protocol:
+    ``(gold, pred, trace, pred_name, pred_trace, program_trace)``.
+
+    Args:
+        val_field: Field name on the prediction to extract the output from.
+        lm_call_penalty: Score subtracted per LM call in ``program_trace``.
+
+    Returns:
+        A metric function returning a float clamped to ``[0.0, 1.0]``.
+    """
+
+    def _metric(
+        gold: Any,
+        pred: Any,
+        trace: Any = None,
+        pred_name: Any = None,
+        pred_trace: Any = None,
+        program_trace: Any = None,
+    ) -> float:
+        output = prediction_output(pred, field=val_field)
+        score = auto_metric(str(output))
+        if program_trace is not None:
+            score -= lm_call_penalty * len(program_trace)
+        return max(0.0, min(1.0, score))
+
+    return _metric
 
 
 def simple_metric(example: Any, prediction: Any, trace: Any = None) -> float:
     """Simple metric for BootstrapFewShot/MIPROv2 — extracts prediction, delegates to auto_metric."""
-    output = getattr(
-        prediction, "answer", getattr(prediction, "output", str(prediction))
-    )
+    output = prediction_output(prediction)
     return auto_metric(str(output))
 
 

@@ -174,13 +174,48 @@ class SelfEvolve:
         )
 
     def _hotswap_program(self, program) -> None:
-        """Hot-swap the active program with a newly compiled one."""
-        from dspytools.core.hotswap import (
-            HotSwapManager,  # lazy: breaks core↔evolve cycle
+        """Persist and hot-swap a newly compiled program into active service.
+
+        Persists the compiled program to a run directory, registers it in the
+        run index, and swaps it in as the active program. Previously a no-op:
+        the newly compiled program was discarded without being deployed.
+        """
+        from dspytools.core._dspy import dspy
+        from dspytools.core.hotswap import HotSwapManager  # lazy: breaks cycle
+        from dspytools.core.output import create_run_dir, save_program
+        from dspytools.core.registry import register_run_with_graph
+
+        # Determine module_type from the compiled program's class
+        if isinstance(program, dspy.Flex):
+            module_type = "flex"
+        elif isinstance(program, dspy.ReAct):
+            module_type = "react"
+        elif isinstance(program, dspy.ChainOfThought):
+            module_type = "cot"
+        else:
+            module_type = "predict"
+
+        # Extract signature fields for persistence
+        sig = getattr(program, "signature", None)
+        inputs = list(sig.input_fields.keys()) if sig is not None else ["input"]
+        outputs = list(sig.output_fields.keys()) if sig is not None else ["output"]
+
+        run_id, run_path = create_run_dir("self-evolve", label="auto")
+        save_program(
+            run_path,
+            program,
+            {"inputs": inputs, "outputs": outputs},
+            module_type=module_type,
+        )
+        register_run_with_graph(
+            run_id,
+            {"optimizer": "self-evolve", "module": "auto", "source": "auto_optimize"},
+            optimizer="self-evolve",
         )
 
         mgr = HotSwapManager()
-        mgr.load_all()
+        mgr.load_single(run_id)
+        mgr.swap(run_id)
 
     @property
     def status(self) -> dict:

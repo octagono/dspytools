@@ -191,6 +191,12 @@ def agent_list():
     default=False,
     help="Show which tools were selected for this question",
 )
+@click.option(
+    "--agent-type",
+    type=click.Choice(["react", "react-v2"]),
+    default="react",
+    help="Agent loop: react (v1 text parsing, small-model safe) or react-v2 (native tool calling)",
+)
 def agent_run(
     name: str,
     question: str,
@@ -198,6 +204,7 @@ def agent_run(
     max_iters: int,
     top_k: int,
     show_tools: bool,
+    agent_type: str,
 ):
     """Run an agent with a question.
 
@@ -211,6 +218,7 @@ def agent_run(
         dspytools agent run my-agent "list git repositories"
         dspytools agent run my-agent "search mlflow traces" --top-k 3
         dspytools agent run my-agent "compare two programs" --show-tools
+        dspytools agent run my-agent "summarize a repo" --agent-type react-v2
     """
     setup_dspy(model=model)
 
@@ -250,19 +258,28 @@ def agent_run(
 
     from dspytools.core._dspy import dspy
 
-    # Use ReAct v1 — text-based parsing (Thought/Action/Observation) that
-    # works reliably with small models (Qwen 7B). ReActV2 requires native
-    # function calling (BAML/JSON schema) which Qwen 7B can't produce.
-    agent = dspy.ReAct(
-        "question -> answer",
-        tools=selected,
-        max_iters=min(max_iters, config.get("max_iters", 10)),
-    )
+    max_iters = min(max_iters, config.get("max_iters", 10))
+    if agent_type == "react-v2":
+        # ReActV2: native tool calling via dspy.ToolCalls/History. Requires a
+        # model that emits structured function calls (Qwen 7B cannot reliably).
+        agent = dspy.ReActV2("question -> answer", tools=selected, max_iters=max_iters)
+    else:
+        # ReAct v1 — text-based parsing (Thought/Action/Observation) that
+        # works reliably with small models (Qwen 7B). ReActV2 requires native
+        # function calling (BAML/JSON schema) which Qwen 7B can't produce.
+        agent = dspy.ReAct("question -> answer", tools=selected, max_iters=max_iters)
 
     click.echo("  Running agent...")
     result = agent(question=question)
-    answer = getattr(result, "answer", str(result))
-    click.echo(f"\n  Answer: {answer}")
+    if getattr(result, "answer", None) is None and hasattr(
+        result, "termination_reason"
+    ):
+        click.echo(
+            f"\n  Agent terminated without an answer: {result.termination_reason}"
+        )
+    else:
+        answer = getattr(result, "answer", str(result))
+        click.echo(f"\n  Answer: {answer}")
 
 
 @agent_cmd.command(name="delete", cls=LLMCommand)

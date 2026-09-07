@@ -59,6 +59,7 @@ class SemanticCache:
         client = get_graph_client()
         self._redis = client.redis()
         self._graph = client.graph("llm_cache")
+        self._breaker = client.cache_breaker()
         self._embedder = get_embedder()
         # Create vector index (idempotent — ignores "already indexed")
         dim = embedder_dimension()
@@ -119,9 +120,9 @@ class SemanticCache:
         """
         prompt_hash = self._prompt_key(prompt)
 
-        # Tier 1: exact match
+        # Tier 1: exact match (breaker-routed — raises CacheError when Redis down)
         exact_key = f"{self._name}:exact:{prompt_hash}"
-        cached = self._redis.get(exact_key)
+        cached = self._breaker.call(self._redis.get, exact_key)
         if cached:
             self._hit_count += 1
             entry = json.loads(cached)
@@ -140,7 +141,8 @@ class SemanticCache:
             self._miss_count += 1
             return None
 
-        result = self._graph.query(
+        result = self._breaker.call(
+            self._graph.query,
             """CALL db.idx.vector.queryNodes('CacheVec', 'embedding', 5, vecf32($vec))
                YIELD node, score
                RETURN node.response, node.prompt, node.metadata, score
@@ -207,11 +209,12 @@ class SemanticCache:
         if vec is not None:
             entry["_vector"] = vec
         entry_json = json.dumps(entry)
-        self._redis.setex(exact_key, self._ttl, entry_json)
+        self._breaker.call(self._redis.setex, exact_key, self._ttl, entry_json)
 
         # Tier 2: FalkorDB graph node with vecf32() embedding
         if vec is not None:
-            self._graph.query(
+            self._breaker.call(
+                self._graph.query,
                 """CREATE (c:CacheVec {
                     key: $key,
                     embedding: vecf32($vec),

@@ -61,6 +61,11 @@ Owns two source files:
   | `server.api.port` | int | 8080 | FastAPI port |
   | `lm.student` | dict | null | Student model config (model, api_base, api_key, temperature, max_tokens) |
   | `lm.teacher` | dict | null | Teacher model config (same fields) |
+  | `falkordb.host` | string | "localhost" | FalkorDB/Redis host |
+  | `falkordb.port` | int | 6379 | FalkorDB/Redis port |
+  | `falkordb.password` | string | null | FalkorDB/Redis password |
+  | `falkordb.db` | int | 0 | Redis DB index (for the raw Redis client) |
+  | `falkordb.database` | string | "dspytools" | FalkorDB graph name (default graph) |
   | `keys` | dict | {} | API key overrides |
 
 ### `env.py` — .env file management

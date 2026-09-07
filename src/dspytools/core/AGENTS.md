@@ -30,7 +30,7 @@ This doc owns all files directly in `src/dspytools/core/` and their contracts. T
 | `mlflow_tracker.py` | MLflow experiment tracking (sync + async) |
 | `drift_monitor.py` | Quality drift detection and auto-recompile cascade |
 | `holdout.py` | Programmatic holdout enforcement (Invariant 5) |
-| `loaders.py` | Shared dataset/module loading + SSOT utilities (`prediction_to_dict`, `get_example_inputs`) |
+| `loaders.py` | Shared dataset/module loading + SSOT utilities (`prediction_to_dict`, `prediction_output`, `get_example_inputs`, `join_inputs`) |
 | `metrics.py` | Shared DSPy metric factories (SSOT) |
 | `cost_tracker.py` | Token counting and cost estimation |
 | `sprt_mojo_bridge.py` | Mojo-accelerated SPRT bridge |
@@ -69,15 +69,16 @@ This doc owns all files directly in `src/dspytools/core/` and their contracts. T
 - `LMRegistry.get_teacher()` — returns the teacher LM from `config["lm"]["teacher"]`. **MUST NEVER be used for inference.** Only for GEPA/distill/finetune optimization paths.
 - `LMRegistry.clear()` — resets all cached instances (used in tests).
 - `setup_dspy()` — calls `dspy.configure(lm=...)` with an LM from the registry. Auto-resolves `api_base` from the configured student model or registry entries when not explicitly provided. Reads `.env` for API keys. Call once at startup.
-  - **Adapter**: reads `cfg["dspy"]["adapter"]` from config (set via `dspytools configure adapter set`). Defaults to `BAMLAdapter(use_native_function_calling=False)`. Supports `"baml"`, `"chat"`, `"json"`, `"xml"` types.
+  - **Adapter**: reads `cfg["dspy"]["adapter"]` from config (set via `dspytools configure adapter set`). Defaults to `BAMLAdapter(use_native_function_calling=False)`. Supports `"baml"`, `"chat"`, `"json"`, `"xml"` types. Only the selected adapter is constructed (not all four); unknown/stale config values fall back to `BAMLAdapter`.
   - **Reasoning patch**: always patched into `baml_adapter._render_type_str` — renders `dspy.Reasoning` as plain `"string"` instead of expanding the Pydantic schema (prevents Qwen 7B outputting `"reasoning"` key instead of `"next_thought"`).
+  - **Parse patch**: `JSONAdapter.parse`/`BAMLAdapter.parse` are replaced with a reasoning-tolerant parse. It first tries strict JSON (json_repair + `{...}` regex), then falls back to ChatAdapter-style `[[ ## field ## ]]` section parsing — small local models (Qwen) echo the BAML template back verbatim instead of emitting JSON. After the `parse_value` cast it applies DSPy 3.3.1's `apply_output_field_defaults` (so omitted defaulted/nullable output fields are filled, matching stock JSONAdapter behavior) and only then enforces presence of required (non-Reasoning) output fields; missing `dspy.Reasoning` fields are tolerated (filled from `reasoning_content` in `_call_postprocess`). **Version-compat**: `apply_output_field_defaults` is imported with feature-detection (try/except ImportError) so a future DSPy that moves/renames the helper degrades to skip-default-filling rather than hard-crashing setup — this is a symbol-level compat guard on a hard dependency, the sole exception to Golden Rule 4's no-guarded-imports.
 
 ### `hotswap.py` — LRU-cached program hot-swap
 
 - `HotSwapManager` holds up to `MAX_LOADED = 16` compiled programs in an `OrderedDict` for LRU eviction.
-- `_load_program_from_run(run_id)` — deterministic loader using `metadata.json`'s `module_type` field (no Predict→ChainOfThought fallback chain). Reads `signature.json` and `program.json` from the run directory.
+- `_load_program_from_run(run_id)` — deterministic loader using `metadata.json`'s `module_type` field (no Predict→ChainOfThought fallback chain). Supports `module_type` values: `"predict"`/default → Predict, `"cot"` → ChainOfThought, `"react"` → ReAct, `"flex"` → `dspy.Flex` (reconstructed with the default `PythonInterpreter` sandbox). Reads `signature.json` and `program.json` from the run directory.
 - `swap(run_id)` — switches active program, O(1). Returns previous active ID.
-- `infer(**inputs)` — runs inference on the active program. Returns a dict (not a DSPy `Prediction`). **SSOT: checks semantic cache (`get_semantic_cache()`) before hitting the LM. Stores result after LM call.** Scores once via `auto_metric`, reuses score for drift monitoring and self-evolve quality tracking. Increments refcount on entry (try), decrements in `finally` block — guarantees cleanup on cache hit, exception, or normal return. On critical drift alert, calls `SemanticCache.adjust_threshold()` to dynamically tighten the cache threshold.
+- `infer(**inputs)` — runs inference on the active program. Returns a dict (not a DSPy `Prediction`). **SSOT: checks semantic cache (`get_semantic_cache()`) before hitting the LM. Stores result after LM call.** Scores once via `auto_metric`, reuses score for drift monitoring and self-evolve quality tracking. Increments refcount on entry (try), decrements in `finally` block — guarantees cleanup on cache hit, exception, or normal return. On critical drift alert, calls `SemanticCache.adjust_threshold()` to dynamically tighten the cache threshold. **Graceful degradation**: a Redis/FalkorDB outage during cache init/check/store/adjust degrades to "cache miss → hit the LM directly" (catches `ServiceUnavailableError`/`ConnectionError`, logs `semantic_cache_unavailable`) — inference never crashes because the semantic cache is down.
 - `swap(run_id, wait_for_drain=False)` — if `wait_for_drain=True` and the active program has outstanding `_refcount > 0`, blocks up to 30s polling until refcount reaches 0. Raises `TimeoutError` if drain times out. After swap, calls `_prefetch_dependents()` to pre-load downstream programs into LRU cache (predictive prefetching via SkillGraph lineage).
 - `warm_swap(run_id)` — loads, reads signature.json to construct field-appropriate test input, runs a verification inference, then swaps. Returns previous active ID (str) or raises `RuntimeError` on test failure / `KeyError` if not found. Uses `_build_test_input()` to inspect signature fields instead of hardcoding `{"input": "test"}`.
 - `load_all()` — loads all programs from `compiled/index.json`, auto-activates first.
@@ -145,7 +146,7 @@ This doc owns all files directly in `src/dspytools/core/` and their contracts. T
 - `DriftMonitor.status()` — returns full status dict with programs_tracked, thresholds, and per-program baseline/current/delta.
 - `DriftMonitor.request_recompile(run_id)` — queues a program for automatic recompilation when critical drift is detected. Called by `HotSwapManager.infer()` on critical alerts.
 - `DriftMonitor.pending_recompiles()` — returns list of programs queued for recompilation.
-- `DriftMonitor.process_recompile_requests(auto_fix=False)` — processes pending recompile queue. Dry-run mode by default; `auto_fix=True` triggers recompilation via GFLPipeline. **Delta-optimization**: uses `compile_draft()` for minor drift (<10%) and `run_single()` for major drift, selecting strategy based on drift severity.
+- `DriftMonitor.process_recompile_requests(auto_fix=False)` — processes pending recompile queue. Dry-run mode by default; `auto_fix=True` triggers recompilation via GFLPipeline. **Delta-optimization**: uses `compile_draft()` for minor drift (<10%) and `run_single()` for major drift, selecting strategy based on drift severity. **Closes the loop**: on successful recompile the freshly compiled run is registered, baseline-updated, and hot-swapped into active service via `HotSwapManager` (best-effort — a swap failure logs `drift_fix_swap_failed` and leaves the run persisted but not active, never crashes).
 - `get_drift_monitor()` — module-level singleton accessor.
 - **Drift → recompile loop**: `hotswap.py` calls `request_recompile()` on critical alerts. `dspytools self auto-fix` inspects and processes the queue.
 - State persisted to `~/.config/dspytools/drift_state.json`.
@@ -160,7 +161,7 @@ This doc owns all files directly in `src/dspytools/core/` and their contracts. T
 
 - `HoldoutGate` singleton enforces holdout isolation: splits trainset into train + holdout before any compile call, stores holdout in-memory, and NEVER passes it to the optimizer.
 - `split(trainset, compile_id)` — deterministic shuffle (seed=42), splits by `holdout_fraction` (default 0.2). Returns `(train, holdout)` tuple. Holdout keyed by `compile_id` in `_splits` dict.
-- `validate_gate(compile_id, compiled_program)` — SPRT-based evaluation on the stored holdout. Uses p0=0.50, p1=0.65, alpha=0.05, beta=0.20 for early termination. Returns `{accepted, score, n_evaluated, reason, holdout_size}`.
+- `validate_gate(compile_id, compiled_program, baseline_program=None)` — SPRT-based evaluation on the stored holdout. Uses p0=0.50, p1=0.65, alpha=0.05, beta=0.20 for early termination. Returns `{accepted, score, n_evaluated, reason, holdout_size}`.
 - `get_holdout_gate()` — module-level singleton accessor. Used by `commands/compile.py` for post-compile validation and by `mcp/tools.py` for the `holdout_status` MCP tool.
 - `gated_compile` decorator — wraps any compile function to auto-split and validate. Not yet wired into the compile pipeline (reserved for future `@gated_compile` usage).
 - `stats` property — returns number of stored splits and their IDs.
@@ -181,6 +182,7 @@ This doc owns all files directly in `src/dspytools/core/` and their contracts. T
   - Returns `1.0` on exact match, `0.0` otherwise.
   - `val_field` parameter allows flexible field selection (e.g. `"answer"`, `"output"`).
   - Used by `commands/compile.py`, `gfl/pipeline.py`, `gfl/optimizer.py`.
+- `gepa_metric_cost_aware(val_field="output", lm_call_penalty=0.01)` — factory returning a 6-arg GEPA metric `(gold, pred, trace, pred_name, pred_trace, program_trace)`. Scores via `auto_metric` then subtracts `lm_call_penalty * len(program_trace)` when `program_trace` is populated (Flex optimization scoring), clamped to `[0.0, 1.0]`. Enables cost-aware Flex optimization via GEPA's `program_trace` parameter. Used by `commands/compile.py` (`compile flex`).
 - All metric factories accept configurable field names — no hardcoded `"output"` in call sites.
 
 ### `cost_tracker.py` — Token counting and cost estimation

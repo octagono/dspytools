@@ -149,6 +149,7 @@ def create_mcp_server() -> Any:
             result = await _route_tool(name, arguments or {})
             return [TextContent(type="text", text=result)]
         except ValueError as e:
+            # _route_tool raises ValueError only for unknown tools.
             msg = str(e)
             hint = ""
             if "Unknown tool" in msg:
@@ -168,7 +169,7 @@ def create_mcp_server() -> Any:
                     ),
                 )
             ]
-        except (RuntimeError, OSError, ValueError, TypeError) as e:
+        except (RuntimeError, OSError, TypeError) as e:
             _log.error("mcp_tool_dispatch_failed", tool=name, error=str(e))
             return [
                 TextContent(

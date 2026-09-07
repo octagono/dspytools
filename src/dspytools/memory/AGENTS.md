@@ -6,8 +6,6 @@ FalkorDB-native persistent memory layer for dspytools. Provides automatic entity
 
 **Integrated into SelfEvolveEngine:** `on_compile()` stores optimization lessons as memories; `suggest_optimizer()` searches memories for past insights before falling back to morphology/UCB.
 
-**Integrated into SelfEvolveEngine:** `on_compile()` stores optimization lessons as memories; `suggest_optimizer()` searches memories for past insights before falling back to morphology/UCB.
-
 ## Ownership
 
 - `MemoryManager` — singleton FalkorDB memory interface with lazy initialization
@@ -54,7 +52,7 @@ graph LR
 - User ID defaults to "dspytools" for global memory
 - Agent ID and run ID enable per-agent and per-run memory isolation
 - Memory is deduplicated automatically by content hash
-- Embeddings stored in Redis with 30-day TTL
+- Embeddings stored on `Memory.embedding` nodes in FalkorDB (no Redis TTL — the vector index owns the embedding)
 
 ## Verification
 

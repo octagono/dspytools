@@ -32,6 +32,10 @@ def mock_cache():
         mock_graph = MagicMock()
         mock_client.return_value.redis.return_value = mock_redis
         mock_client.return_value.graph.return_value = mock_graph
+        # cache_breaker().call must invoke fn so wrapped ops hit the mocks.
+        mock_client.return_value.cache_breaker.return_value.call.side_effect = (
+            lambda fn, *a, **kw: fn(*a, **kw)
+        )
 
         mock_emb = MagicMock()
         mock_emb.return_value = [0.1] * 768

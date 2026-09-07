@@ -5,7 +5,7 @@ Signatures:
   AnalyzeCodeStructure    → directories, entry points, dev info
   GenerateLLMsTxt         → final llms.txt content
 
-Module: RepositoryAnalyzer — multi-stage pipeline with CodeAct + ProgramOfThought.
+Module: RepositoryAnalyzer — multi-stage ChainOfThought pipeline.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ else:
     from dspytools.core._dspy import dspy
 
 import hashlib
-import logging
 import subprocess
 import threading
 
@@ -27,24 +26,12 @@ from dspytools.generate.cache import get_analysis_cache
 
 _log = get_logger(__name__)
 
-_SANDBOX_LOGGERS_SUPPRESSED: bool = False
-
-
-def _suppress_sandbox_loggers():
-    """Suppress Deno sandbox error loggers — idempotent, call before first CodeAct/PoT use."""
-    global _SANDBOX_LOGGERS_SUPPRESSED
-    if _SANDBOX_LOGGERS_SUPPRESSED:
-        return
-    for _name in ("dspy.predict.program_of_thought", "dspy.predict.code_act"):
-        logging.getLogger(_name).setLevel(logging.CRITICAL)
-    _SANDBOX_LOGGERS_SUPPRESSED = True
-
 
 # ── Sandbox Pool ────────────────────────────────────────────────────────────
 
 
 class SandboxPool:
-    """Persistent pool of sandbox workers for CodeAct/PoT execution.
+    """Persistent pool of sandbox workers for sandboxed code execution.
 
     Instead of cold-starting a process for each sandboxed execution,
     keep 2-4 workers warm and reuse them across evaluations.
@@ -374,50 +361,34 @@ class GenerateLLMsTxt(dspy.Signature):
 
 
 class RepositoryAnalyzer(dspy.Module):
-    """Multi-stage llms.txt generator with CodeAct + ProgramOfThought.
+    """Multi-stage llms.txt generator.
 
     Pipeline:
       1. AnalyzeRepository (ChainOfThought) → purpose, concepts, architecture
       2. AnalyzeCodeStructure (ChainOfThought) → directories, entries, dev info
-      3. CodeAct → usage_examples from file_tree
-      4. ProgramOfThought → structured summary of concepts
+      3. ChainOfThought → usage_examples from file_tree
+      4. ChainOfThought → structured summary of concepts
       5. GenerateLLMsTxt (ChainOfThought) → final llms.txt
     """
 
     def __init__(self):
         super().__init__()
-        _suppress_sandbox_loggers()  # quiet CodeAct/PoT loggers before creating predictors
-        self.sandbox_pool = get_sandbox_pool()  # warm sandbox workers
         self.analyze_repo = dspy.ChainOfThought(AnalyzeRepositoryV2)
         self.analyze_structure = dspy.ChainOfThought(AnalyzeCodeStructure)
 
-        def analyze_files(file_tree: str, query: str) -> str:
-            """Analyze repository files for patterns matching query."""
-            matches = [
-                line for line in file_tree.split("\n") if query.lower() in line.lower()
-            ]
-            return "\n".join(matches[:20]) if matches else "No matches found"
-
-        self.code_analyzer = dspy.CodeAct(
-            "file_tree, package_files -> usage_examples: str, edge_cases: str",
-            tools=[analyze_files],
-            max_iters=1,
+        # Stages 3+4 run on the student LM (Qwen local), which cannot execute
+        # sandboxed code. DSPy's CodeAct/ProgramOfThought were deprecated in
+        # 3.3.1 (removal in 3.5) and always fell back to these ChainOfThought
+        # predictors on the local model anyway — so ChainOfThought is the
+        # primary, non-deprecated structure.
+        self.code_analyzer = dspy.ChainOfThought(
+            "file_tree, package_files -> usage_examples: str, edge_cases: str"
         )
-
-        self.pot_summarizer = dspy.ProgramOfThought(
-            "bullet_points -> structured_summary: str",
-            max_iters=1,
+        self.pot_summarizer = dspy.ChainOfThought(
+            "bullet_points -> structured_summary: str"
         )
 
         self.generate_llms_txt = dspy.ChainOfThought(GenerateLLMsTxt)
-
-        # Pre-create fallback modules (avoids re-instantiation on every failure)
-        self._code_fallback = dspy.ChainOfThought(
-            "file_tree, package_files -> usage_examples: str, edge_cases: str"
-        )
-        self._pot_fallback = dspy.ChainOfThought(
-            "bullet_points -> structured_summary: str"
-        )
 
     def forward(
         self,
@@ -456,28 +427,16 @@ class RepositoryAnalyzer(dspy.Module):
             package_files=package_files,
         )
 
-        # Stage 3: Generate usage examples (CodeAct with fallback)
-        try:
-            code_result = self.code_analyzer(
-                file_tree=file_tree,
-                package_files=package_files,
-            )
-            usage_examples = code_result.usage_examples
-        except (RuntimeError, OSError, ValueError, TypeError) as e:
-            _log.warning("codeact_stage_failed", error=str(e))
-            code_result = self._code_fallback(
-                file_tree=file_tree,
-                package_files=package_files,
-            )
-            usage_examples = code_result.usage_examples
+        # Stage 3: Generate usage examples from the repository file tree
+        code_result = self.code_analyzer(
+            file_tree=file_tree,
+            package_files=package_files,
+        )
+        usage_examples = code_result.usage_examples
 
-        # Stage 4: Summarize concepts via ProgramOfThought (with fallback)
+        # Stage 4: Summarize the analyzed concepts
         concept_bullets = "\n".join(f"- {c}" for c in repo_analysis.key_concepts)
-        try:
-            pot_summary = self.pot_summarizer(bullet_points=concept_bullets)
-        except (RuntimeError, OSError, ValueError, TypeError) as e:
-            _log.warning("pot_stage_failed", error=str(e))
-            pot_summary = self._pot_fallback(bullet_points=concept_bullets)
+        pot_summary = self.pot_summarizer(bullet_points=concept_bullets)
 
         # Stage 5: Generate final llms.txt
         llms_txt = self.generate_llms_txt(

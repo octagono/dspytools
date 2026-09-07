@@ -9,7 +9,7 @@
 - [Package Map](architecture.md) — module dependency graph, data flow, 96 source files
 - [GFL Pipeline](gfl-pipeline.md) — 4-way comparison, Successive Halving, Speculative Compile
 - [Self-Evolve Engine](self-evolve.md) — Gödel Agent, SPRT validation, Meta Agent Search
-- [MCP Server](mcp-server.md) — 65 tools, 9 resources, 3 prompts, transport
+- [MCP Server](mcp-server.md) — 65 tools, 8 resources, 3 prompts, transport
 - [LoRA Integration](lora-integration.md) — adapter management, distillation, Colab training
 - [Cost Tracking](architecture.md#cost-tracking) — token counting and cost estimation
 - [Drift Detection](architecture.md#drift-detection) — quality monitoring (core/drift_monitor.py)

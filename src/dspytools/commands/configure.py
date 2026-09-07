@@ -178,7 +178,7 @@ def adapter_cmd():
 
 
 @adapter_cmd.command(name="set", cls=LLMCommand)
-@click.argument("type", type=click.Choice(["chat", "json", "xml", "baml", "twostep"]))
+@click.argument("type", type=click.Choice(["chat", "json", "xml", "baml"]))
 def adapter_set(type: str):
     """Set the default DSPy adapter type."""
     cfg = load_config()
@@ -196,7 +196,6 @@ def adapter_list():
         "json": "JSONAdapter — JSON input/output",
         "xml": "XMLAdapter — XML-tagged prompts",
         "baml": "BAMLAdapter — compact nested Pydantic schema",
-        "twostep": "TwoStepAdapter — plan then generate",
     }.items():
         click.echo(f"  {name}: {desc}")
 

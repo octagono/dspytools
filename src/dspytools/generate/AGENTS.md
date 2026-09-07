@@ -25,13 +25,12 @@ Files are independent — no circular imports. `__init__.py` aggregates; all oth
 - **5-stage pipeline** executed in `forward()`:
   1. `AnalyzeRepository` (ChainOfThought) → project_purpose, key_concepts, architecture_overview
   2. `AnalyzeCodeStructure` (ChainOfThought) → important_directories, entry_points, development_info
-  3. `CodeAct` → usage_examples (with ChainOfThought fallback on Deno sandbox errors)
-  4. `ProgramOfThought` → structured_summary from concept bullets (with ChainOfThought fallback on Deno errors)
+  3. `ChainOfThought` → usage_examples from file_tree (replaces deprecated `CodeAct`, removed in this codebase)
+  4. `ChainOfThought` → structured_summary from concept bullets (replaces deprecated `ProgramOfThought`)
   5. `GenerateLLMsTxt` (ChainOfThought) → final llms_txt_content
 - **AST caching**: `RepositoryAnalyzer.forward()` computes a composite SHA-256 key from all inputs and checks `AnalysisCache` before running the pipeline. On cache hit, returns a `dspy.Prediction` directly. After pipeline completion, the result is cached for future runs. Cache directory: `~/.cache/dspytools/analysis/`. Cache is keyed by 24-char SHA-256 digest of `repo_url|file_tree|readme_content|package_files`.
 - `AnalysisCache.warmup(paths)` — pre-computes real composite cache keys for LOCAL repository paths by scanning file_tree/readme/packages. Used by `generate warmup` CLI to reduce cold-start latency for batch processing of local repos.
-- CodeAct and ProgramOfThought use `max_iters=1` and have ChainOfThought fallbacks registered via `try/except Exception` in `forward()`.
-- `RepositoryAnalyzer.__init__` suppresses Deno sandbox loggers (`dspy.predict.program_of_thought`, `dspy.predict.code_act`) to `CRITICAL` level — 3B model cannot execute sandboxed code.
+- **DSPy 3.3.1 migration**: `CodeAct` and `ProgramOfThought` were deprecated upstream (removal in 3.5) and always fell back to ChainOfThought on the local 3B model (which cannot execute sandboxed code). Stages 3+4 are now plain `ChainOfThought` predictors — no sandbox, no fallback scaffolding. See `RepositoryAnalyzer.__init__`.
 
 ### Signatures (`module.py`)
 
@@ -89,9 +88,9 @@ Files are independent — no circular imports. `__init__.py` aggregates; all oth
 
 - Keep signatures declarative — prefer `desc` kwargs over type annotations on DSPy fields.
 - When adding a new signature variant, use the named manipulation method (`with_instructions`, `append`, etc.) — do not subclass.
-- SandboxPool (`SandboxPool` class + `get_sandbox_pool()` singleton) in `module.py` maintains warm `python3` workers. Workers accept code via `sys.stdin.readline()`, exec it, and signal completion with `__SANDBOX_DONE__`. Falls back to one-shot `subprocess.run()` on pool exhaustion. `RepositoryAnalyzer.__init__` creates `self.sandbox_pool = get_sandbox_pool()` for CodeAct/PoT sandboxing.
+- SandboxPool (`SandboxPool` class + `get_sandbox_pool()` singleton) in `module.py` maintains warm `python3` workers. Workers accept code via `sys.stdin.readline()`, exec it, and signal completion with `__SANDBOX_DONE__`. Falls back to one-shot `subprocess.run()` on pool exhaustion. Consumed by the MCP sandbox tools (`mcp/server.py`, `mcp/tools.py`) — `RepositoryAnalyzer` no longer instantiates it (its stages are ChainOfThought and run no sandboxed code).
 - `SandboxPool.__init__` accepts `max_reuse: int = 50` and `max_output_size: int = 1_000_000`. Workers exceeding `max_reuse` uses are terminated and replaced with fresh processes on the next `_acquire` call, preventing memory accumulation from untrusted repo code. `max_output_size` prevents runaway output from consuming memory — exceeded output kills the worker and returns an error. `_reuse_count` tracks usage per worker index. `_total_recycled` tracks cumulative recycle events. `stats` property exposes `reuse_counts`, `max_reuse`, `recycled`, and `total_recycled` counters.
-- CodeAct and ProgramOfThought stages MUST include ChainOfThought fallbacks. The 3B model (Qwen3.5-9B) cannot execute Deno sandbox code, and the fallback catches `Exception` broadly to handle any runtime sandbox error.
+- The `generate` pipeline stages (3+4) are plain ChainOfThought — they run no sandboxed code, so no fallback is needed. The local model (Qwen3.5-9B) cannot execute Deno sandbox code; the deprecated `CodeAct`/`ProgramOfThought` stages that attempted it were removed in the DSPy 3.3.1 migration.
 - Ground truth examples should be real `dspy.Example` objects with `.with_inputs()` — do not use raw dicts.
 - `gather_repository_info()` is the single source of truth for file tree retrieval — CLI commands must not duplicate this logic.
 - MCP tool loading (`load_mcp_tools_sync`) must be defensive (never raise) because `.mcp.json` may be absent in CI or fresh clones.
