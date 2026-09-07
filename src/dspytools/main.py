@@ -126,7 +126,14 @@ class LazyGroup(SelfOptimizingCLI):
             raise
 
 
-@click.version_option(version=__version__, prog_name="dspytools")
+def _print_version(ctx: click.Context, param: Any, value: Any) -> None:
+    """Echo the CLI version and exit (--version handler)."""
+    if not value or ctx.resilient_parsing:
+        return
+    click.echo(f"dspytools, version {__version__}")
+    ctx.exit()
+
+
 def _cli():
     """DSPyTools — CLI for DSPy program management, MCP agents, and hot-swap inference."""
 
@@ -135,6 +142,16 @@ cli = LazyGroup(
     name="dspytools",
     help="DSPyTools — CLI for DSPy program management, MCP agents, and hot-swap inference.",
     context_settings={"help_option_names": ["-h", "--help"]},
+    params=[
+        click.Option(
+            ["--version"],
+            is_flag=True,
+            expose_value=False,
+            is_eager=True,
+            callback=_print_version,
+            help="Show the version and exit.",
+        )
+    ],
     callback=_cli,
 )
 
