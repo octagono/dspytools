@@ -15,14 +15,15 @@ from dspytools.skills.discovery import (
     search_external,
 )
 from dspytools.skills.loader import Skill, SkillLoader
-from dspytools.skills.manager import SkillManager
+from dspytools.skills.manager import SkillManager, load_skill_program
 
 __all__ = [
+    "ExternalSkill",
     "Skill",
     "SkillLoader",
     "SkillManager",
-    "ExternalSkill",
-    "search_external",
-    "popular_skills",
     "list_categories",
+    "load_skill_program",
+    "popular_skills",
+    "search_external",
 ]

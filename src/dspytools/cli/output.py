@@ -6,7 +6,8 @@ for consistent, beautiful output.
 
 from __future__ import annotations
 
-from typing import Any, Callable, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import click
 from rich.console import Console
@@ -166,7 +167,7 @@ def status_text(status: str) -> str:
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-def label_option(f: F) -> F:
+def label_option[F: Callable[..., Any]](f: F) -> F:
     """Decorator: adds --label Click option for run labeling."""
     return click.option(
         "--label",
@@ -176,7 +177,7 @@ def label_option(f: F) -> F:
     )(f)
 
 
-def force_option(f: F) -> F:
+def force_option[F: Callable[..., Any]](f: F) -> F:
     """Decorator: adds --force Click option to force recompilation."""
     return click.option(
         "--force/--no-force",

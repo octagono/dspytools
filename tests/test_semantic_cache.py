@@ -71,7 +71,7 @@ def _mock_graph_result(rows: list) -> MagicMock:
 
 class TestCheckExact:
     def test_exact_hit(self, mock_cache):
-        cache, redis, graph, _ = mock_cache
+        cache, redis, _graph, _ = mock_cache
         redis.get.return_value = _entry("cached_value")
 
         result = cache.check("hello world")
@@ -89,7 +89,7 @@ class TestCheckExact:
         assert result is None
 
     def test_exact_with_metadata(self, mock_cache):
-        cache, redis, graph, _ = mock_cache
+        cache, redis, _graph, _ = mock_cache
         redis.get.return_value = _entry("val", {"source": "test"})
 
         result = cache.check("prompt")
@@ -97,7 +97,7 @@ class TestCheckExact:
         assert result["metadata"] == {"source": "test"}
 
     def test_exact_key_format(self, mock_cache):
-        cache, redis, graph, _ = mock_cache
+        cache, redis, _graph, _ = mock_cache
         redis.get.return_value = _entry("r")
 
         cache.check("test_prompt")
@@ -148,7 +148,7 @@ class TestCheckSemantic:
         assert result is None
 
     def test_embedder_failure(self, mock_cache):
-        cache, redis, graph, embedder = mock_cache
+        cache, redis, _graph, embedder = mock_cache
         redis.get.return_value = None
         embedder.return_value = None
 
@@ -184,13 +184,13 @@ class TestStore:
         assert graph.query.call_count >= 1
 
     def test_store_with_vector_skip(self, mock_cache):
-        cache, redis, graph, embedder = mock_cache
+        cache, _redis, _graph, embedder = mock_cache
         cache.store("prompt", "response", _vector=[0.5] * 768)
 
         assert embedder.call_count == 0
 
     def test_store_with_metadata(self, mock_cache):
-        cache, redis, graph, _ = mock_cache
+        cache, redis, _graph, _ = mock_cache
         cache.store("prompt", "response", metadata={"source": "test"})
 
         setex_call = redis.setex.call_args
@@ -198,7 +198,7 @@ class TestStore:
         assert stored["metadata"] == {"source": "test"}
 
     def test_store_embedder_failure(self, mock_cache):
-        cache, redis, graph, embedder = mock_cache
+        cache, _redis, _graph, embedder = mock_cache
         embedder.return_value = None
         cache.store("prompt", "response")
 
@@ -220,7 +220,7 @@ class TestClear:
         assert graph.query.call_count >= 1
 
     def test_clear_empty(self, mock_cache):
-        cache, redis, graph, _ = mock_cache
+        cache, redis, _graph, _ = mock_cache
         redis.scan.side_effect = [(0, [])]
 
         cache.clear()

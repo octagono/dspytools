@@ -26,7 +26,6 @@ import rich_click as click
 
 from dspytools.core._dspy import dspy
 
-
 # ── Hermetic scaffolding ───────────────────────────────────────────────────
 
 
@@ -37,7 +36,7 @@ def _hermetic_setup(monkeypatch):
 
     state: dict = {"cfg": {}}
     monkeypatch.setattr(setup_mod, "load_config", lambda: state["cfg"])
-    monkeypatch.setattr(setup_mod, "load_env", lambda: {})
+    monkeypatch.setattr(setup_mod, "load_env", dict)
     monkeypatch.setattr(setup_mod, "merge_environ", lambda env=None: None)
     setup_mod.LMRegistry.clear()
     yield state
@@ -219,8 +218,8 @@ def test_enable_thinking_configs_produce_distinct_lm_instances(
 
 
 def test_llm_help_sends_canonical_request(monkeypatch, tmp_path: Path):
-    from dspytools.cli import llm_help
     import dspytools.core.setup as setup_mod
+    from dspytools.cli import llm_help
 
     @click.group(help="Test group.")
     def cli() -> None: ...
@@ -260,8 +259,8 @@ def test_llm_help_sends_canonical_request(monkeypatch, tmp_path: Path):
 
 
 def test_llm_help_returns_none_for_short_answer(monkeypatch, tmp_path: Path):
-    from dspytools.cli import llm_help
     import dspytools.core.setup as setup_mod
+    from dspytools.cli import llm_help
 
     @click.group(help="Test group.")
     def cli() -> None: ...

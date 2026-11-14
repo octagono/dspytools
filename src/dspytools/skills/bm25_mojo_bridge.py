@@ -13,7 +13,6 @@ Usage:
 from __future__ import annotations
 
 from types import ModuleType
-from typing import Optional
 
 import numpy as np
 
@@ -27,7 +26,7 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 HAS_MOJO: bool
-_mojo_module: Optional[ModuleType] = None
+_mojo_module: ModuleType | None = None
 
 HAS_MOJO, _mojo_module = try_load_mojo("bm25", "bm25_score_docs", logger)
 

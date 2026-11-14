@@ -182,7 +182,7 @@ def gen_explore(repo_path: str, output: str | None, label: str | None):
 
     console.print(f"\n[bold]MCP Git Explorer: {repo_path}[/]")
 
-    mcp_sessions, mcp_tools = load_mcp_tools_sync()
+    _mcp_sessions, mcp_tools = load_mcp_tools_sync()
 
     if not mcp_tools:
         warn("No MCP tools loaded — check .mcp.json config")

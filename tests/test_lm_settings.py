@@ -24,7 +24,6 @@ from click.testing import CliRunner
 
 from dspytools.core._dspy import dspy
 
-
 # ── Hermetic scaffolding ───────────────────────────────────────────────────
 
 
@@ -35,7 +34,7 @@ def _hermetic(monkeypatch):
 
     state: dict = {"cfg": {}}
     monkeypatch.setattr(setup_mod, "load_config", lambda: state["cfg"])
-    monkeypatch.setattr(setup_mod, "load_env", lambda: {})
+    monkeypatch.setattr(setup_mod, "load_env", dict)
     monkeypatch.setattr(setup_mod, "merge_environ", lambda env=None: None)
     monkeypatch.setattr(setup_mod, "_setup_configured", False)
     setup_mod.LMRegistry.clear()
@@ -244,7 +243,7 @@ def test_cli_cache_enable_rejects_bad_safe_type(monkeypatch):
     import dspytools.commands.configure as configure_mod
     from dspytools.commands.configure import configure_cmd
 
-    monkeypatch.setattr(configure_mod, "load_config", lambda: {})
+    monkeypatch.setattr(configure_mod, "load_config", dict)
     monkeypatch.setattr(configure_mod, "save_user_config", lambda c: None)
 
     result = CliRunner().invoke(

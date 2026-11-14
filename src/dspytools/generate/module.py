@@ -96,7 +96,7 @@ class SandboxPool:
                         proc.wait(timeout=2)
                         # Spawn replacement
                         try:
-                            new_proc = subprocess.Popen(  # noqa: S603
+                            new_proc = subprocess.Popen(
                                 [
                                     self.command,
                                     "-c",

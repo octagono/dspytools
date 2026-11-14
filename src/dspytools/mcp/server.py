@@ -26,15 +26,11 @@ from mcp.types import Tool as MCPTool
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
 
-from dspytools.commands.compile import _OPTIMIZER_SPECS
 from dspytools.config.settings import load_config
 from dspytools.core.logging_config import get_logger
-from dspytools.core.mlflow_tracker import MLflowAsyncTracker, get_tracker
 from dspytools.core.registry import get_run, list_compiled_runs
-from dspytools.evolve import SelfEvolve
 from dspytools.generate.module import get_sandbox_pool
-from dspytools.gfl.pipeline import GFLPipeline
-from dspytools.mcp.tools import BUILTIN_TOOLS
+from dspytools.mcp.tools import BUILTIN_TOOLS, _ensure_lm_configured, optimizer_catalog
 from dspytools.skills import SkillManager
 
 _ALL_TOOLS = BUILTIN_TOOLS
@@ -42,16 +38,98 @@ _ALL_TOOLS = BUILTIN_TOOLS
 _log = get_logger(__name__)
 
 
+def _resolve_tool(name: str) -> dict | None:
+    """Return the tool spec for `name`, or None when the name is unknown."""
+    return _ALL_TOOLS.get(name)
+
+
 async def _route_tool(name: str, arguments: dict) -> str:
-    """Route a tool call to the right handler."""
-    if name in BUILTIN_TOOLS:
-        handler = BUILTIN_TOOLS[name]["handler"]
-        return handler(**arguments)
-    raise ValueError(f"Unknown tool: {name}")
+    """Route a tool call to the right handler — unknown names raise LookupError."""
+    spec = _resolve_tool(name)
+    if spec is None:
+        raise LookupError(f"Unknown tool: {name}")
+    handler = spec["handler"]
+    return handler(**arguments)
+
+
+def _dispatch(name: str, arguments: dict[str, Any] | None) -> str:
+    """Classify and run one tool call, returning the JSON/text payload.
+
+    The tool is resolved *before* the handler runs, so a handler's own
+    `ValueError` is never misreported as an unknown tool:
+
+    - unknown name → ``tool_not_found`` (with the available tools)
+    - handler `ValueError` (bad arguments, missing LM, dspy validation) →
+      ``invalid_request``
+    - handler `RuntimeError`/`OSError`/`TypeError` → ``execution_failed``
+    - anything else → ``internal_error``
+    """
+    spec = _resolve_tool(name)
+    if spec is None:
+        _log.warning("mcp_unknown_tool", tool=name)
+        return json.dumps(
+            {
+                "error": "tool_not_found",
+                "message": f"Unknown tool: {name}",
+                "hint": "Use list_* tools to see available tools.",
+                "available_tools": sorted(_ALL_TOOLS)[:10],
+            }
+        )
+
+    try:
+        return spec["handler"](**(arguments or {}))
+    except ValueError as e:
+        _log.warning("mcp_tool_invalid_request", tool=name, error=str(e))
+        return json.dumps(
+            {
+                "error": "invalid_request",
+                "tool": name,
+                "message": str(e),
+                "hint": (
+                    "Check the arguments against this tool's inputSchema "
+                    "(see list_tools)."
+                ),
+            }
+        )
+    except (RuntimeError, OSError, TypeError) as e:
+        _log.error("mcp_tool_dispatch_failed", tool=name, error=str(e))
+        return json.dumps(
+            {
+                "error": "execution_failed",
+                "tool": name,
+                "message": str(e),
+                "hint": (
+                    "Check input parameters and try again. Use inspect_history "
+                    "to debug LM calls."
+                ),
+            }
+        )
+    except Exception as e:
+        _log.error(
+            "MCP tool unexpected error: tool=%s error=%s", name, e, exc_info=True
+        )
+        return json.dumps({"error": "internal_error", "tool": name, "message": str(e)})
 
 
 def create_mcp_server() -> Any:
-    """Unified MCP server: dspytools programs + compilation management."""
+    """Unified MCP server: dspytools programs + compilation management.
+
+    DSPy is configured once here, on the thread that constructs the server, so
+    every transport (stdio/SSE) starts with an LM rather than raising
+    `ValueError: No LM is loaded` from the first `Predict`. Handlers keep their
+    own `_ensure_lm_configured()` guard for worker threads. A configuration
+    failure is logged and does not prevent the server from starting: the
+    LM-touching tools then report the documented in-band LM error.
+
+    `outputSchema` is intentionally not forwarded: tool results are free-form
+    text and the specs no longer declare output schemas, so nothing is silently
+    dropped here.
+    """
+
+    try:
+        _ensure_lm_configured()
+    except Exception as e:  # noqa: BLE001 - the server must still start
+        _log.error("mcp_startup_lm_configuration_failed", error=str(e))
 
     server = Server("dspytools")
 
@@ -122,6 +200,12 @@ def create_mcp_server() -> Any:
 
     @server.list_tools()
     async def handle_list_tools() -> list[MCPTool]:
+        """Advertised tool surface.
+
+        Only `name`, `description`, `inputSchema` and `annotations` are sent —
+        the specs declare no `outputSchema`, and this handler does not forward
+        one (see `tools.py`'s module docstring).
+        """
         tools = []
         for name, spec in _ALL_TOOLS.items():
             tool_kwargs = {
@@ -145,59 +229,8 @@ def create_mcp_server() -> Any:
     async def handle_call_tool(
         name: str, arguments: dict[str, Any] | None
     ) -> list[TextContent]:
-        try:
-            result = await _route_tool(name, arguments or {})
-            return [TextContent(type="text", text=result)]
-        except ValueError as e:
-            # _route_tool raises ValueError only for unknown tools.
-            msg = str(e)
-            hint = ""
-            if "Unknown tool" in msg:
-                hint = "Use list_* tools to see available tools."
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {
-                            "error": "tool_not_found"
-                            if "Unknown tool" in msg
-                            else "invalid_request",
-                            "message": msg,
-                            "hint": hint,
-                            "available_tools": list(_ALL_TOOLS.keys())[:10],
-                        }
-                    ),
-                )
-            ]
-        except (RuntimeError, OSError, TypeError) as e:
-            _log.error("mcp_tool_dispatch_failed", tool=name, error=str(e))
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {
-                            "error": "execution_failed",
-                            "message": str(e),
-                            "hint": "Check input parameters and try again. Use inspect_history to debug LM calls.",
-                        }
-                    ),
-                )
-            ]
-        except Exception as e:
-            _log.error(
-                "MCP tool unexpected error: tool=%s error=%s", name, e, exc_info=True
-            )
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {
-                            "error": "internal_error",
-                            "message": str(e),
-                        }
-                    ),
-                )
-            ]
+        """Dispatch via `_dispatch` (see its docstring for the error classes)."""
+        return [TextContent(type="text", text=_dispatch(name, arguments))]
 
     @server.list_resources()
     async def handle_list_resources():
@@ -271,6 +304,9 @@ def create_mcp_server() -> Any:
         elif uri_str == "dspytools://config":
             data = json.dumps(load_config(), indent=2, default=str)
         elif uri_str == "dspytools://mlflow":
+            # Imported here so the stdio startup path never imports the MLflow SDK.
+            from dspytools.core.mlflow_tracker import MLflowAsyncTracker, get_tracker
+
             tracker = get_tracker()
             tracker._ensure_initialized()
             info = {
@@ -289,6 +325,10 @@ def create_mcp_server() -> Any:
             data = json.dumps(skills, indent=2)
         elif uri_str == "dspytools://evolve":
             try:
+                # Imported here: `dspytools.evolve` pulls the MLflow tracing SDK,
+                # which must stay off the stdio startup path.
+                from dspytools.evolve import SelfEvolve
+
                 evolve = SelfEvolve()
                 data = json.dumps(evolve.status, indent=2)
             except (OSError, RuntimeError, ValueError) as e:
@@ -297,6 +337,9 @@ def create_mcp_server() -> Any:
                     {"error": "evolve status unavailable", "detail": str(e)}, indent=2
                 )
         elif uri_str == "dspytools://gfl/status":
+            # Imported here: `dspytools.gfl` pulls the MLflow tracing SDK.
+            from dspytools.gfl.pipeline import GFLPipeline
+
             pipeline = GFLPipeline()
             data = json.dumps(
                 {
@@ -313,7 +356,9 @@ def create_mcp_server() -> Any:
             pool = get_sandbox_pool()
             data = json.dumps(pool.stats, indent=2)
         elif uri_str == "dspytools://optimizers":
-            data = json.dumps(list(_OPTIMIZER_SPECS.keys()), indent=2)
+            # Same single source as tool_list_optimizers — a name listed as
+            # callable is a name compile_optimizer resolves.
+            data = json.dumps(optimizer_catalog(), indent=2)
         else:
             raise ValueError(f"Unknown resource: {uri_str}")
         # Return Iterable[ReadResourceContents] — what the low-level SDK expects

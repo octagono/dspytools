@@ -22,8 +22,8 @@ from dspytools.gfl.pipeline import GFLPipeline
 
 __all__ = [
     "RouterAgent",
-    "auto_metric",
     "SelfEvolve",
+    "auto_metric",
     "get_router",
 ]
 

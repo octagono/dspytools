@@ -325,7 +325,7 @@ def gfl_spin(module_name: str, iterations: int, trainset: str | None):
         else:
             raw = _json.loads(trainset)
         examples = [
-            dspy.Example(**item).with_inputs(list(item.keys())[0]) for item in raw
+            dspy.Example(**item).with_inputs(next(iter(item.keys()))) for item in raw
         ]
     else:
         examples = [dspy.Example(input="hello", output="world").with_inputs("input")]
@@ -385,7 +385,7 @@ def gfl_opsd(
         else:
             raw = _json.loads(trainset)
         examples = [
-            dspy.Example(**item).with_inputs(list(item.keys())[0]) for item in raw
+            dspy.Example(**item).with_inputs(next(iter(item.keys()))) for item in raw
         ]
     else:
         examples = [dspy.Example(input="hello", output="world").with_inputs("input")]

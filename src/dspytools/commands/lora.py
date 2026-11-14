@@ -84,7 +84,8 @@ def _get_base_model() -> str:
     from dspytools.config.settings import load_config
 
     cfg = load_config()
-    student = cfg.get("lm", {}).get("student", {})
+    # ``lm.student`` may be an explicit null in a hand-written config.
+    student = cfg.get("lm", {}).get("student") or {}
     model = student.get("model", DEFAULT_STUDENT_MODEL)
     # Strip provider prefix (openai/unsloth/Qwen3.5-9B-GGUF → unsloth/Qwen3.5-9B-GGUF)
     if "/" in model and not model.startswith("http"):

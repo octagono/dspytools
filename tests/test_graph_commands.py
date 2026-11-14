@@ -18,7 +18,7 @@ class TestGraphCommandFunctions:
 
     def test_add_dependency_called(self, mock_redis: tuple[MagicMock, MagicMock]):
         """graph_add_dependency calls FalkorDBSkillGraph.add_dependency."""
-        r, g = mock_redis
+        _r, _g = mock_redis
         with patch("dspytools.commands.graph.FalkorDBSkillGraph") as mock_sg:
             mock_sg.return_value = MagicMock()
             from dspytools.commands.graph import graph_add_dependency
@@ -105,7 +105,7 @@ class TestGraphCommandFunctions:
 
     def test_connection_ping_checks(self, mock_redis: tuple[MagicMock, MagicMock]):
         """get_graph_client().ping() returns expected value."""
-        r, g = mock_redis
+        _r, _g = mock_redis
         from unittest.mock import patch as _patch
 
         with _patch("dspytools.graph.client.get_graph_client") as mock_gc:

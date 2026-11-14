@@ -46,7 +46,7 @@ FalkorDB + Redis graph database integration for dspytools. Provides O(1) graph t
 - `get_dependents(skill)` — returns skills that depend on this skill
 - `transitive_dependents(skill)` — BFS traversal for all indirect dependents
 - `record_task_profile(profile, pattern_type, success)` — tracks task execution
-- `record_program(run_id, optimizer, score, parent_id, dataset_hash)` — tracks program lineage
+- `record_program(run_id, optimizer, score=None, parent_id=..., dataset_hash=..., skill_name=None, program_path=None)` — tracks program lineage. Merges a `(:Skill {name})` node (the label `list_skills()` / `hotswap._prefetch_dependents()` MATCH) carrying `program_path`, and writes `score` only when one was measured. Called best-effort from `SkillManager.compile_skill()`; an unreachable graph logs and never fails a compile.
 - `program_lineage(run_id)` — returns full ancestry chain
 - `list_skills()` — returns all skills in graph
 - `skill_stats(name)` — returns per-skill statistics

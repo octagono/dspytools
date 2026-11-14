@@ -176,39 +176,80 @@ class FalkorDBSkillGraph:
         self,
         run_id: str,
         optimizer: str,
-        score: float,
+        score: float | None = None,
         parent_id: str | None = None,
         dataset_hash: str | None = None,
+        skill_name: str | None = None,
+        program_path: str | None = None,
     ) -> None:
-        """Record a compiled program in the graph."""
-        self.graph.query(
-            """
-            MERGE (r:Run {id: $run_id})
-            SET r.optimizer = $optimizer,
-                r.score = $score,
-                r.created_at = timestamp()
-            """,
-            {"run_id": run_id, "optimizer": optimizer, "score": score},
-        )
+        """Record a compiled program in the graph.
 
-        if parent_id:
+        With ``skill_name`` the node is a ``:Skill`` (what ``list_skills`` and
+        ``hotswap._prefetch_dependents()`` MATCH); otherwise the legacy ``:Run``
+        node is used. ``score`` is written only when a caller actually evaluated
+        something — a fabricated ``0.0``/``1.0`` is worse than no datapoint.
+        """
+        if skill_name:
             self.graph.query(
                 """
-                MATCH (child:Run {id: $run_id})
-                MERGE (parent:Run {id: $parent_id})
+                MERGE (s:Skill {name: $skill_name})
+                SET s.program_path = $program_path,
+                    s.optimizer = $optimizer,
+                    s.updated_at = timestamp()
+                """,
+                {
+                    "skill_name": skill_name,
+                    "program_path": program_path,
+                    "optimizer": optimizer,
+                },
+            )
+            if score is not None:
+                self.graph.query(
+                    """
+                    MATCH (s:Skill {name: $skill_name})
+                    SET s.score = $score
+                    """,
+                    {"skill_name": skill_name, "score": score},
+                )
+            node_match = "MATCH (child:Skill {name: $node_id})"
+        else:
+            self.graph.query(
+                """
+                MERGE (r:Run {id: $run_id})
+                SET r.optimizer = $optimizer,
+                    r.created_at = timestamp()
+                """,
+                {"run_id": run_id, "optimizer": optimizer},
+            )
+            if score is not None:
+                self.graph.query(
+                    """
+                    MATCH (r:Run {id: $run_id})
+                    SET r.score = $score
+                    """,
+                    {"run_id": run_id, "score": score},
+                )
+            node_match = "MATCH (child:Run {id: $node_id})"
+
+        node_id = skill_name or run_id
+        if parent_id:
+            self.graph.query(
+                f"""
+                {node_match}
+                MERGE (parent:Run {{id: $parent_id}})
                 MERGE (child)-[:CHILD_OF]->(parent)
                 """,
-                {"run_id": run_id, "parent_id": parent_id},
+                {"node_id": node_id, "parent_id": parent_id},
             )
 
         if dataset_hash:
             self.graph.query(
-                """
-                MATCH (r:Run {id: $run_id})
-                MERGE (d:Dataset {hash: $hash})
-                MERGE (r)-[:TRAINED_ON]->(d)
+                f"""
+                {node_match}
+                MERGE (d:Dataset {{hash: $hash}})
+                MERGE (child)-[:TRAINED_ON]->(d)
                 """,
-                {"run_id": run_id, "hash": dataset_hash},
+                {"node_id": node_id, "hash": dataset_hash},
             )
 
     def program_lineage(self, run_id: str) -> list[dict]:

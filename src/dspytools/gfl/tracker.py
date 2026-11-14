@@ -67,8 +67,7 @@ class LSETracker:
         }
 
         self.history["iterations"].append(entry)
-        if score > self.history["best_score"]:
-            self.history["best_score"] = score
+        self.history["best_score"] = max(self.history["best_score"], score)
         if delta > 0:
             self.history["total_improvement"] += delta
 

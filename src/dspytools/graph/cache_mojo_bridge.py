@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import ctypes
 from types import ModuleType
-from typing import Optional
 
 import numpy as np
 
@@ -29,7 +28,7 @@ logger = get_logger(__name__)
 HAS_MOJO: bool = False
 """True when the Mojo module was loaded successfully."""
 
-_mojo_module: Optional[ModuleType] = None
+_mojo_module: ModuleType | None = None
 """Cached reference to the loaded Mojo module."""
 
 HAS_MOJO, _mojo_module = try_load_mojo("vector_utils", "load_store_float32", logger)
@@ -39,7 +38,7 @@ HAS_MOJO, _mojo_module = try_load_mojo("vector_utils", "load_store_float32", log
 # ---------------------------------------------------------------------------
 
 
-def vec_to_blob(arr: np.ndarray, buffer: Optional[bytearray] = None) -> bytes:
+def vec_to_blob(arr: np.ndarray, buffer: bytearray | None = None) -> bytes:
     """Serialize a Float32 numpy array to a compact bytes blob.
 
     Args:

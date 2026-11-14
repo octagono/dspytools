@@ -85,7 +85,7 @@ def signature_new(
     from dspytools.generators import SignatureGeneratorDSPy
 
     gen = SignatureGeneratorDSPy()
-    code, field_count, warnings = gen.generate(prompt, name, instructions)
+    code, _field_count, warnings = gen.generate(prompt, name, instructions)
 
     if not code or len(code) < 80:
         raise click.ClickException("DSPy generator produced incomplete output")

@@ -8,15 +8,118 @@ Skills follow the harness-so pattern:
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
+from typing import Any
 
-from dspytools.config.settings import compiled_dir, skills_dir as get_skills_dir
+from dspytools.config.settings import compiled_dir
+from dspytools.config.settings import skills_dir as get_skills_dir
 from dspytools.core._dspy import dspy
-from dspytools.core._io import read_json
+from dspytools.core._io import read_json, write_json
+from dspytools.core.logging_config import get_logger
 from dspytools.core.metrics import answer_exact_match
-from dspytools.graph.skill_graph import FalkorDBSkillGraph
+from dspytools.core.programs import is_current_dspy_version, saved_dspy_version
 from dspytools.skills.loader import Skill, SkillLoader
+
+_log = get_logger(__name__)
+
+
+def _yaml_scalar(value: str) -> str:
+    """Encode a frontmatter scalar as a JSON string (a valid YAML subset).
+
+    Unquoted values broke every consumer that parses the frontmatter as YAML:
+    a description containing ``": "`` (or ``" #"``) produced invalid YAML and
+    GEPA's ``InstructionProposer`` raised ``ValueError`` before any reflection.
+    JSON string encoding needs no extra dependency and round-trips exactly.
+    """
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _count_demos(program: Any) -> int:
+    """Number of labeled examples stored on a compiled program's predictors."""
+    try:
+        predictors = list(program.named_predictors())
+    except Exception:  # not a dspy.Module (e.g. a bare Predict)
+        demos = getattr(program, "demos", None)
+        return len(demos or [])
+    return sum(
+        len(getattr(predictor, "demos", None) or []) for _, predictor in predictors
+    )
+
+
+def _module_for_type(module_type: str, signature: str) -> Any:
+    """Build the module shape recorded in ``metadata.module_type``.
+
+    Mirrors ``core.hotswap._load_program_from_run``: a CoT/ReAct artifact loaded
+    into a bare ``dspy.Predict`` raised because the saved state has more
+    predictors than the fresh program.
+    """
+    kind = (module_type or "predict").lower()
+    if kind in {"cot", "chain_of_thought"}:
+        return dspy.ChainOfThought(signature)
+    if kind == "react":
+        return dspy.ReAct(signature, tools=[])
+    if kind == "flex":
+        return dspy.Flex(signature)
+    return dspy.Predict(signature)
+
+
+def _signature_string(skill_path: Path) -> str:
+    sig_path = skill_path / "signature.json"
+    if not sig_path.exists():
+        return "question -> answer"
+    sig_data = read_json(sig_path)
+    inputs = ", ".join(sig_data.get("inputs", ["input"]))
+    outputs = ", ".join(sig_data.get("outputs", ["output"]))
+    return f"{inputs} -> {outputs}"
+
+
+def _module_type(skill_path: Path) -> str:
+    meta_path = skill_path / "metadata.json"
+    if meta_path.exists():
+        module_type = read_json(meta_path).get("module_type")
+        if module_type:
+            return str(module_type)
+    sig_path = skill_path / "signature.json"
+    if sig_path.exists():
+        module_type = read_json(sig_path).get("module_type")
+        if module_type:
+            return str(module_type)
+    return "predict"
+
+
+def load_skill_program(skill_path: str | Path) -> Any | None:
+    """Load a skill's saved program in the shape it was compiled in.
+
+    Returns ``None`` when there is no program or when it was saved by a
+    different DSPy (stale artifacts are treated as absent, matching
+    ``SkillLoader``).
+    """
+    path = Path(skill_path)
+    prog_path = path / "program.json"
+    if not prog_path.exists():
+        return None
+    if not is_current_dspy_version(prog_path):
+        _log.warning(
+            "skill_program_dspy_version_mismatch",
+            skill=path.name,
+            saved_version=saved_dspy_version(prog_path),
+            hint="recompile with `dspytools skills compile`",
+        )
+        return None
+
+    program = _module_for_type(_module_type(path), _signature_string(path))
+
+    saved = json.loads(prog_path.read_text())
+    try:
+        program.load(str(prog_path))
+    except (KeyError, ValueError):
+        # Predict format: program.json wraps state in {predictor: {...}} but
+        # load_state() needs the flat {signature, demos, ...} mapping.
+        if "predictor" in saved:
+            program.load_state(saved["predictor"])
+    return program
 
 
 class SkillManager:
@@ -36,9 +139,9 @@ class SkillManager:
         skill_dir.mkdir(parents=True, exist_ok=True)
 
         md_content = f"""---
-name: {name}
-description: {description}
-signature: {signature}
+name: {_yaml_scalar(name)}
+description: {_yaml_scalar(description)}
+signature: {_yaml_scalar(signature)}
 ---
 {body or f"# {name}\n\n{description}"}
 """
@@ -63,10 +166,7 @@ signature: {signature}
         optimizer: str = "labeled_few_shot",
     ) -> dict:
         """Compile a skill's DSPy program and save to the skill directory."""
-        # Search all paths via loader (project-local, user-wide, ~/.agents)
-        loader = SkillLoader(str(self.dir))
-        skills = loader.load_all()
-        skill = next((s for s in skills if s.name == name), None)
+        skill = self.loader.get(name)
         if not skill:
             return {"error": f"Skill '{name}' not found"}
 
@@ -86,9 +186,11 @@ signature: {signature}
             return 1.0 if answer_exact_match(gold, pred) else 0.0
 
         optimizers = {
-            "labeled_few_shot": lambda: dspy.LabeledFewShot(
-                k=min(4, len(trainset or []))
-            ).compile(student=student, trainset=trainset or []),
+            # DSPy's own default demo cap (16). Pinning k=4 contradicted the
+            # documented "demo caps stay at DSPy defaults" contract.
+            "labeled_few_shot": lambda: dspy.LabeledFewShot().compile(
+                student=student, trainset=trainset or []
+            ),
             # Demo caps stay at DSPy's defaults (labeled 16 / bootstrapped 4).
             "bootstrap_few_shot": lambda: dspy.BootstrapFewShot(
                 metric=metric,
@@ -99,35 +201,60 @@ signature: {signature}
 
         if trainset:
             compiled = optimizers.get(optimizer, optimizers["labeled_few_shot"])()
+            applied_optimizer = (
+                optimizer if optimizer in optimizers else "labeled_few_shot"
+            )
         else:
             compiled = student  # No trainset, just save the base program
-
-        from dspytools.core._io import write_json
+            applied_optimizer = "none"
 
         compiled.save(str(skill_path / "program.json"))
 
+        inputs, arrow, outputs = sig.rpartition("->")
+        if not arrow:
+            inputs, outputs = sig, "answer"
+        signature_data = {
+            "inputs": inputs.strip().split(", "),
+            "outputs": outputs.strip().split(", "),
+            "module_type": "predict",
+        }
+        write_json(skill_path / "signature.json", signature_data)
         write_json(
-            skill_path / "signature.json",
+            skill_path / "metadata.json",
             {
-                "inputs": sig.split("->")[0].strip().split(", "),
-                "outputs": sig.split("->")[1].strip().split(", "),
+                "skill": name,
+                "module_type": "predict",
+                "optimizer": applied_optimizer,
+                "demos": _count_demos(compiled),
+                "trainset_size": len(trainset or []),
             },
         )
 
         skill.program_path = str(skill_path / "program.json")
 
-        # Record in FalkorDB graph
-        graph = FalkorDBSkillGraph()
-        graph.record_program(
-            run_id=f"skill_{name}",
-            optimizer=optimizer,
-            score=1.0 if trainset else 0.0,
-        )
+        # Best-effort graph write: the artifact is already on disk, so an
+        # unreachable FalkorDB must not turn a finished compile into a failure.
+        # No score is recorded — nothing was evaluated here.
+        try:
+            from dspytools.graph.skill_graph import FalkorDBSkillGraph
+
+            FalkorDBSkillGraph().record_program(
+                run_id=f"skill_{name}",
+                optimizer=applied_optimizer,
+                score=None,
+                skill_name=name,
+                program_path=str(skill_path / "program.json"),
+            )
+        except Exception as exc:
+            _log.warning("skill_graph_record_failed", skill=name, error=str(exc))
 
         return {
             "status": "compiled",
             "skill": name,
-            "optimizer": optimizer,
+            "optimizer": applied_optimizer,
+            "demos": _count_demos(compiled),
+            "trainset_size": len(trainset or []),
+            "score": None,
             "has_program": True,
         }
 
@@ -148,14 +275,20 @@ signature: {signature}
         skill_dir.mkdir(parents=True, exist_ok=True)
 
         shutil.copy(prog_path, skill_dir / "program.json")
+        sig_str = "question -> answer"
         if sig_path.exists():
             shutil.copy(sig_path, skill_dir / "signature.json")
             sig_data = read_json(sig_path)
             sig_str = f"{', '.join(sig_data.get('inputs', ['input']))} -> {', '.join(sig_data.get('outputs', ['output']))}"
-        else:
-            sig_str = "question -> answer"
+        # metadata.json carries module_type; without it the loader falls back
+        # to a bare Predict and cannot rebuild a CoT/ReAct artifact.
+        meta_path = run_path / "metadata.json"
+        if meta_path.exists():
+            shutil.copy(meta_path, skill_dir / "metadata.json")
 
-        return self.create_skill(skill_name, description, sig_str)
+        skill = self.create_skill(skill_name, description, sig_str)
+        skill.program_path = str(skill_dir / "program.json")
+        return skill
 
     def auto_optimize_skill(self, name: str, trainset: list | None = None) -> dict:
         """Auto-optimize a skill using the GFL pipeline.
@@ -166,8 +299,7 @@ signature: {signature}
                 is found, falls back to labeled_few_shot on a minimal synthetic set.
         """
 
-        skill = self.loader.load_all()  # populate index
-        skill = next((s for s in skill if s.name == name), None)
+        skill = self.loader.get(name)
         if not skill or not skill.has_program:
             return {"error": f"Skill '{name}' has no compiled program"}
         assert skill.path is not None, f"Skill '{name}' has no path"
@@ -196,8 +328,14 @@ signature: {signature}
 
         setup_dspy()
 
-        student = dspy.Predict(skill.frontmatter.get("signature", "question -> answer"))
-        student.load(str(skill.path / "program.json"))
+        student = load_skill_program(skill.path)
+        if student is None:
+            return {
+                "error": (
+                    f"Skill '{name}' has no loadable program "
+                    "(missing, or compiled by another DSPy — recompile it)"
+                )
+            }
         student.set_lm(LMRegistry.get_or_default())
 
         pipeline = GFLPipeline()
@@ -215,9 +353,18 @@ signature: {signature}
 
         return {"error": "Optimization produced no results"}
 
+    def get(self, name: str) -> Skill | None:
+        """Resolve a skill by exact identity (never by BM25 rank)."""
+        return self.loader.get(name)
+
     def list_skills(self) -> list[Skill]:
         return self.loader.load_all()
 
     def search(self, query: str, k: int = 5) -> list[Skill]:
         self.loader.load_all()
         return self.loader.search(query, k)
+
+    def search_hybrid(self, query: str, k: int = 5) -> list[Skill]:
+        """Opt-in embedding + BM25 search (falls back to BM25 offline)."""
+        self.loader.load_all()
+        return self.loader.search_embeddings(query, k)

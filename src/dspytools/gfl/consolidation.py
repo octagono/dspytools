@@ -1152,10 +1152,15 @@ class SkillConsolidator:
         skill_dir = SkillConsolidator.SKILLS_DIR / name
         skill_dir.mkdir(parents=True, exist_ok=True)
         if not content.startswith("---"):
+            # Same frontmatter encoding as SkillManager.create_skill: every
+            # scalar is JSON-quoted so the file stays valid YAML for consumers
+            # such as GEPA's InstructionProposer.
+            from dspytools.skills.manager import _yaml_scalar
+
             content = (
-                f"---\nname: {name}\n"
-                f"description: Trace2Skill-evolved agent skill\n"
-                f"signature: input -> output\n---\n{content}"
+                f"---\nname: {_yaml_scalar(name)}\n"
+                f"description: {_yaml_scalar('Trace2Skill-evolved agent skill')}\n"
+                f"signature: {_yaml_scalar('input -> output')}\n---\n{content}"
             )
         (skill_dir / "SKILL.md").write_text(content)
         meta = {
@@ -1232,7 +1237,7 @@ class SkillConsolidator:
         if not successes:
             return ["No success patterns found — increase training data diversity"]
         patterns: list[str] = []
-        optimizers = set(s.get("optimizer", "") for s in successes)
+        optimizers = {s.get("optimizer", "") for s in successes}
         if optimizers:
             patterns.append(f"Effective optimizers: {', '.join(optimizers)}")
         return patterns

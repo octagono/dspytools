@@ -287,8 +287,8 @@ def cache_disable():
 @cache_cmd.command(name="show", cls=LLMCommand)
 def cache_show():
     """Show persisted DSPy cache settings and cache locations."""
-    from dspytools.core._dspy import dspy
     from dspytools.config.settings import cache_dir
+    from dspytools.core._dspy import dspy
 
     click.echo("  Persisted (dspy.cache):")
     for line in _format_cache_config(load_config().get("dspy", {}).get("cache", {})):
@@ -300,8 +300,8 @@ def cache_show():
 @cache_cmd.command(name="clear", cls=LLMCommand)
 def cache_clear():
     """Clear dspytools' analysis cache and DSPy's LM cache."""
-    from dspytools.core._dspy import dspy
     from dspytools.config.settings import cache_dir
+    from dspytools.core._dspy import dspy
 
     targets = [
         ("analysis", cache_dir()),

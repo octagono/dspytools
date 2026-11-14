@@ -688,7 +688,7 @@ class GFLPipeline:
                 for item in new_data:
                     ex = dspy.Example(**item)
                     if item:
-                        first_key = list(item.keys())[0]
+                        first_key = next(iter(item.keys()))
                         ex = ex.with_inputs(first_key)
                     new_examples.append(ex)
                 trainset = list(trainset) + new_examples

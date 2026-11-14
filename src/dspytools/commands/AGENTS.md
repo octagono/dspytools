@@ -53,7 +53,7 @@ Each file owns its command group. No file-level cross-dependencies — commands 
 | `self.py` | `self` | Auto-evolve commands — self-optimization, router management, drift→recompile cascade (auto-fix), UCB exploration status/reset, watch daemon (--interval --alert-url, --auto-fix for autonomous recompile+hot-swap), distill auto-evaluate with rollback |
 | `server.py` | `server` | Hot-swap server — start/stop/status the FastAPI inference server. The forked API child calls `setup_dspy()` **before** `run_api()` so an unconfigured process never binds the port (the API would otherwise 503/500 every `/infer`) |
 | `signature.py` | `signature` | DSPy signature CRUD — new, list, show, edit, delete |
-| `skills.py` | `skills` | Skills system — list, install, create, export, ecosystem search (find/discover/categories) |
+| `skills.py` | `skills` | Skills system — `list`, `create`, `search` (BM25 by default, `--hybrid` adds embedding RRF), `compile` (`--trainset` required to actually optimize; reports applied optimizer + demo count), `auto-optimize`, `show` (exact-name resolution), `generate-from-run`, and ecosystem search (`find`/`discover`/`categories` over a curated list plus an unauthenticated skills.sh fetch) |
 | `tool.py` | `tool` | DSPy tool registration — register, list, show, inspect, from-mcp, history. `tool python-interpreter` runs `dspy.PythonInterpreter` as a context manager so its ~400 MB Deno/Pyodide sandbox is torn down (`__exit__` → `shutdown()`) instead of leaking for the life of the CLI process |
 
 ## Work Guidance
@@ -100,6 +100,11 @@ JSON-safe params, GRPO signature): `uv run --no-sync pytest tests/test_optimizer
 `--parallel-tools` adapter cloning and LM capability gate, and `--stream` chunk
 delivery plus the no-chunk fallback — alongside the `core` retry/cost contracts:
 `uv run --no-sync pytest tests/test_dspy_optimizations.py -q`.
+
+`tests/test_skills_integrity.py` covers the `skills` command surface — real
+optimizer reporting with `--trainset`, exact-name `show`, opt-in `--hybrid`
+search, and per-skill `--gepa-skills` paths:
+`uv run --no-sync pytest tests/test_skills_integrity.py -q`.
 
 Manual smoke test for everything else:
 ```

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import importlib.util as util
 import sys as _sys
+from importlib import util
 from pathlib import Path
 
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn

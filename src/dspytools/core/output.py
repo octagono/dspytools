@@ -5,10 +5,11 @@ No other module serializes run artifacts — this module is the single gateway.
 """
 
 import shutil
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from dspytools.config.settings import compiled_dir
 from dspytools.core._io import read_json, write_json

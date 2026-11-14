@@ -16,6 +16,7 @@ import re
 import time
 import uuid
 from functools import lru_cache
+from typing import Self
 
 import numpy as np
 
@@ -41,7 +42,7 @@ class MemoryManager:
 
     _instance: MemoryManager | None = None
 
-    def __new__(cls) -> MemoryManager:
+    def __new__(cls) -> Self:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False

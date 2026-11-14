@@ -23,8 +23,7 @@ def _strip_code_fences(code: str) -> str:
             if code.startswith(prefix):
                 code = code[len(prefix) :]
                 break
-        if code.endswith("```"):
-            code = code[:-3]
+        code = code.removesuffix("```")
     return code.strip()
 
 

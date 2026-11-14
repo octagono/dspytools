@@ -19,6 +19,6 @@ from dspytools.generators.module_generator import ModuleGeneratorDSPy
 from dspytools.generators.signature_generator import SignatureGeneratorDSPy
 
 __all__ = [
-    "SignatureGeneratorDSPy",
     "ModuleGeneratorDSPy",
+    "SignatureGeneratorDSPy",
 ]

@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import threading
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Callable
 
 from dspytools.core.logging_config import get_logger
 

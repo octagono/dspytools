@@ -29,9 +29,9 @@ from dspytools.help.context import (
 _log = get_logger(__name__)
 
 __all__ = [
+    "AutoCompiler",
     "HelpManager",
     "SelfOptimizingCLI",
-    "AutoCompiler",
 ]
 
 

@@ -13,10 +13,19 @@ def mcp_cmd():
 @click.option("--config", "-c", "cfg_path", default=".mcp.json", help="MCP config file")
 def mcp_tools(cfg_path: str):
     """List available MCP tools from config."""
-    from dspytools.mcp.loader import load_mcp_tools_sync
+    from dspytools.mcp.loader import MCPSessionPool, load_mcp_tools_sync
 
     click.echo(f"  Loading MCP tools from {cfg_path}...")
-    sessions, tools = load_mcp_tools_sync(cfg_path)
+    _sessions, tools = load_mcp_tools_sync(cfg_path)
+
+    # Per-server connection failures are reported, never swallowed: an empty or
+    # partial tool list must not look like "that tool does not exist".
+    failures = MCPSessionPool.failed_servers()
+    for failure in failures:
+        click.echo(
+            f"    ✗ {failure['server']}: {failure['error']}",
+            err=True,
+        )
 
     if tools:
         click.echo(f"\n  Loaded {len(tools)} tools:")
@@ -24,15 +33,28 @@ def mcp_tools(cfg_path: str):
             click.echo(f"    • {t.name}")
             if t.desc:
                 click.echo(f"      {t.desc[:120]}")
+        if failures:
+            click.echo(
+                f"\n  {len(failures)} MCP server(s) unavailable — "
+                "tools from those servers are missing from this list.",
+                err=True,
+            )
     else:
-        click.echo("  No MCP tools loaded")
+        if failures:
+            click.echo(
+                "  No MCP tools loaded: every configured server failed to connect "
+                f"({len(failures)}).",
+                err=True,
+            )
+        else:
+            click.echo("  No MCP tools loaded")
 
-        # Show config guide
-        load_config()
-        click.echo("\n  To enable MCP, create .mcp.json:")
-        click.echo(
-            '    {"mcpServers": {"git": {"command": "uvx", "args": ["git-mcp"]}}}'
-        )
+            # Show config guide
+            load_config()
+            click.echo("\n  To enable MCP, create .mcp.json:")
+            click.echo(
+                '    {"mcpServers": {"git": {"command": "uvx", "args": ["git-mcp"]}}}'
+            )
 
 
 @mcp_cmd.command(name="serve", cls=LLMCommand)
@@ -52,6 +74,10 @@ def mcp_serve(transport: str, port: int):
 
     For local agents: --transport stdio
     For remote agents: --transport sse --port 8002
+
+    DSPy is configured by `create_mcp_server()` before the transport starts, so
+    an unconfigured process never serves `infer` (which would raise
+    `ValueError: No LM is loaded` on the first call).
     """
     if transport == "stdio":
         click.echo("  Starting MCP server (stdio)...", err=True)

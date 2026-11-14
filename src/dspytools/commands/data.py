@@ -210,7 +210,7 @@ def data_load(
             rename_map[old_k.strip()] = new_k.strip()
 
     # Classify source type
-    is_local_file = file_exists or source.endswith(".json") or source.endswith(".csv")
+    is_local_file = file_exists or source.endswith((".json", ".csv"))
 
     if fmt == "huggingface" or (fmt == "auto" and "/" in source and not is_local_file):
         field_list = fields.split(",") if fields else None
@@ -260,9 +260,7 @@ def data_load(
         ok(f"Loaded {len(dataset)} examples from '{source}' [{split}] ({mode})")
 
     elif fmt in ("json", "csv") or (
-        fmt == "auto"
-        and file_exists
-        and (source.endswith(".json") or source.endswith(".csv"))
+        fmt == "auto" and file_exists and (source.endswith((".json", ".csv")))
     ):
         if source.endswith(".csv"):
             with open(source) as f:

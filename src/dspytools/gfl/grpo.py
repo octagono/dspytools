@@ -12,7 +12,8 @@ endpoints do not, so callers must guard the same way ``compile finetune`` does.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from dspytools.core.metrics import exact_match_metric
 

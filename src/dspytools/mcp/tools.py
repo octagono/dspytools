@@ -3,11 +3,22 @@
 Optimization 6: MCP tool responses are cached in Redis with TTL (5s default)
 and LRU eviction (max 256 entries), eliminating redundant file reads on every
 agent call. Cache persists across MCP server restarts.
+
+Schema note: tool specs declare `description`, `inputSchema` and `annotations`
+only. `outputSchema` is deliberately **not** declared — the server does not
+forward it (see `mcp/server.py::handle_list_tools`), so the SDK's output
+validation never ran and the old entries were inaccurate dead weight. Do not
+reintroduce the field without also emitting it from `handle_list_tools`.
+
+Imports stay lazy on the stdio startup path: `mlflow` is imported inside the
+`doctor` handler (it is used for one tracking-URI lookup) so
+`import dspytools.mcp.server` never pulls it in.
 """
 
 from __future__ import annotations
 
 import fnmatch
+import functools
 import io
 import json
 import json as _j
@@ -18,21 +29,21 @@ import threading
 import time
 import urllib.request
 from collections import OrderedDict
+from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import dspy
 else:
     from dspytools.core._dspy import dspy
 
-import mlflow
-
-from dspytools.commands.compile import _OPTIMIZER_SPECS
 from dspytools.commands.evaluate import _get_metric, _load_program
 from dspytools.commands.lora import _adapter_model_name, _get_base_model
 from dspytools.commands.self import _get_status
-from dspytools.config.settings import adapters_dir as _adapters_dir, llama_cpp_url
+from dspytools.config.settings import adapters_dir as _adapters_dir
+from dspytools.config.settings import llama_cpp_url
 from dspytools.core._io import read_json
 from dspytools.core.drift_monitor import get_drift_monitor
 from dspytools.core.holdout import get_holdout_gate
@@ -40,7 +51,6 @@ from dspytools.core.hotswap import HotSwapManager
 from dspytools.core.loaders import load_module_by_name, load_trainset
 from dspytools.core.logging_config import get_logger
 from dspytools.core.metrics import exact_match_metric
-from dspytools.core.mlflow_tracker import get_tracker
 from dspytools.core.registry import (
     get_lineage,
     get_run,
@@ -49,20 +59,9 @@ from dspytools.core.registry import (
     list_signatures,
 )
 from dspytools.core.setup import LMRegistry, setup_dspy
-from dspytools.evolve.self_evolve import get_engine
 from dspytools.generate import RepositoryAnalyzer, gather_repository_info
 from dspytools.generate.cache import get_analysis_cache
 from dspytools.generate.module import get_sandbox_pool
-from dspytools.gfl.consolidation import SkillConsolidator
-from dspytools.gfl.paper_optimizers import (
-    GEPAParetoFrontier,
-    LSETreeExplorer,
-    MetaPromptOptimizer,
-    PurifiedOPSDOptimizer,
-    SPINOptimizer,
-)
-from dspytools.gfl.pipeline import GFLPipeline
-from dspytools.gfl.synthetic import ChallengerSolver, DataSynthesizer
 from dspytools.graph.cache import get_semantic_cache
 from dspytools.graph.client import get_graph_client
 from dspytools.graph.redis_cache import RedisCache, get_compile_cache, get_mcp_cache
@@ -244,6 +243,113 @@ def _ensure_lm_configured() -> None:
         setup_dspy()
 
 
+def _lm_tool(fn: Callable) -> Callable:
+    """Guard one LM-touching tool handler.
+
+    Every handler that reaches an LM is wrapped in this: it configures DSPy
+    once (`_ensure_lm_configured`) and turns a configuration failure into the
+    documented in-band error shape (`_error`, i.e. ``{"error", "detail"}``)
+    instead of letting a raw exception reach the MCP transport. Handlers that
+    only read files, caches or the registry are not wrapped.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> str:
+        try:
+            _ensure_lm_configured()
+        except Exception as e:  # noqa: BLE001 - reported in-band, never raised
+            return _error(
+                e,
+                detail=(
+                    "DSPy has no usable LM. Configure one with "
+                    "`dspytools configure lm set student <model>` (and a teacher "
+                    "for GEPA) or set the API key, then restart the MCP server."
+                ),
+            )
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+# Optimizer families that exist only as `dspytools compile <command>` commands.
+# They are not constructible from `_OPTIMIZER_SPECS`, so `compile_optimizer`
+# cannot run them; they are reported separately instead of being advertised as
+# callable (that mismatch used to make every list-then-compile fail).
+_CLI_ONLY_OPTIMIZERS: dict[str, str] = {
+    "avatar": "dspy.AvatarOptimizer - upstream still calls the removed TypedPredictor",
+    "better-together": "dspy.BetterTogether program merger",
+    "bootstrap-finetune": "alias of `finetune`",
+    "distill": "LoRA distillation pipeline (teacher-driven)",
+    "ensemble": "dspy.Ensemble over already-compiled modules",
+    "finetune": "dspy.BootstrapFinetune - needs a fine-tuning API, not llama.cpp",
+    "flex": "dspy.Flex + GEPA wrapper (needs an interpreter pool)",
+    "grpo": "dspy.teleprompt.grpo.GRPO - finetune-only, refuses llama.cpp",
+}
+
+# Underscore spellings the older tool surface used; accepted as aliases only.
+_OPTIMIZER_ALIASES: dict[str, str] = {
+    "bootstrap_few_shot": "bootstrap-few-shot",
+    "bootstrap_few_shot_optuna": "bootstrap-few-shot-optuna",
+    "bootstrap_few_shot_random": "bootstrap-few-shot-random",
+    "bootstrap_finetune": "bootstrap-finetune",
+    "infer_rules": "infer-rules",
+    "labeled_few_shot": "labeled-few-shot",
+}
+
+# Legacy spellings of names that only exist as CLI commands.
+_CLI_ONLY_ALIASES: dict[str, str] = {
+    "better_together": "better-together",
+}
+
+# Lazily populated copy of `commands.compile._OPTIMIZER_SPECS` (see
+# `_optimizer_specs()` — `commands.compile` imports the MLflow SDK).
+_OPTIMIZER_SPECS_CACHE: dict[str, Any] | None = None
+
+
+def _optimizer_specs() -> dict[str, Any]:
+    """The `_OPTIMIZER_SPECS` table from `commands/compile.py`, imported lazily.
+
+    `commands.compile` imports `core.mlflow_tracker`, which imports the MLflow
+    SDK at module scope. Importing the table lazily keeps MLflow off the stdio
+    startup path while still giving `list_optimizers`, the
+    `dspytools://optimizers` resource and `compile_optimizer` one shared source.
+    """
+    global _OPTIMIZER_SPECS_CACHE
+    if _OPTIMIZER_SPECS_CACHE is None:
+        from dspytools.commands.compile import _OPTIMIZER_SPECS
+
+        _OPTIMIZER_SPECS_CACHE = _OPTIMIZER_SPECS
+    return _OPTIMIZER_SPECS_CACHE
+
+
+def optimizer_catalog() -> dict[str, Any]:
+    """Return the single source of truth for optimizer names.
+
+    `tool_list_optimizers`, the `dspytools://optimizers` resource and
+    `tool_compile_optimizer` all derive from `_OPTIMIZER_SPECS`, so a name that
+    is listed under ``optimizers`` is exactly a name `compile_optimizer`
+    resolves. Families that only exist as CLI commands live under ``cli_only``
+    and are explicitly not callable through this tool.
+    """
+    return {
+        "optimizers": sorted(_optimizer_specs()),
+        "cli_only": dict(sorted(_CLI_ONLY_OPTIMIZERS.items())),
+    }
+
+
+def _canonical_optimizer_name(name: str) -> str:
+    """Map a listed/legacy optimizer spelling to its `_OPTIMIZER_SPECS` key."""
+    key = (name or "").strip().lower()
+    key = _OPTIMIZER_ALIASES.get(key, _CLI_ONLY_ALIASES.get(key, key))
+    specs = _optimizer_specs()
+    if key in specs or key in _CLI_ONLY_OPTIMIZERS:
+        return key
+    hyphenated = key.replace("_", "-")
+    if hyphenated in specs or hyphenated in _CLI_ONLY_OPTIMIZERS:
+        return hyphenated
+    return key
+
+
 def tool_list_programs() -> str:
     def _compute() -> str:
         mgr = _get_hotswap()
@@ -264,6 +370,7 @@ def tool_swap_program(program_id: str) -> str:
         return _error(e)
 
 
+@_lm_tool
 def tool_infer(**inputs: Any) -> str:
     mgr = _get_hotswap()
     result = mgr.infer(**inputs)
@@ -275,9 +382,7 @@ def tool_get_program_metadata(program_id: str) -> str:
     meta = mgr.get_metadata(program_id)
     if meta:
         return json.dumps(meta, indent=2)
-    return json.dumps(
-        {"status": "error", "message": f"Program '{program_id}' not found"}
-    )
+    return _error(f"Program '{program_id}' not found")
 
 
 def tool_list_signatures() -> str:
@@ -300,13 +405,6 @@ BUILTIN_TOOLS: dict[str, dict] = {
     "list_programs": {
         "description": "List all loaded compiled programs with active flag",
         "inputSchema": {"type": "object", "properties": {}},
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "programs": {"type": "array"},
-                "active_id": {"type": "string"},
-            },
-        },
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -327,14 +425,6 @@ BUILTIN_TOOLS: dict[str, dict] = {
             },
             "required": ["program_id"],
         },
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "status": {"type": "string"},
-                "active": {"type": "string"},
-                "previous": {"type": "string"},
-            },
-        },
         "annotations": {
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -349,10 +439,6 @@ BUILTIN_TOOLS: dict[str, dict] = {
             "type": "object",
             "properties": {},
             "additionalProperties": True,
-        },
-        "outputSchema": {
-            "type": "object",
-            "properties": {"status": {"type": "string"}, "result": {"type": "object"}},
         },
         "annotations": {
             "readOnlyHint": False,
@@ -374,7 +460,6 @@ BUILTIN_TOOLS: dict[str, dict] = {
             },
             "required": ["program_id"],
         },
-        "outputSchema": {"type": "object"},
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -386,14 +471,6 @@ BUILTIN_TOOLS: dict[str, dict] = {
     "list_signatures": {
         "description": "List available generated signatures",
         "inputSchema": {"type": "object", "properties": {}},
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "status": {"type": "string"},
-                "count": {"type": "integer"},
-                "data": {"type": "array"},
-            },
-        },
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -405,14 +482,6 @@ BUILTIN_TOOLS: dict[str, dict] = {
     "list_modules": {
         "description": "List available generated modules",
         "inputSchema": {"type": "object", "properties": {}},
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "status": {"type": "string"},
-                "count": {"type": "integer"},
-                "data": {"type": "array"},
-            },
-        },
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -424,14 +493,6 @@ BUILTIN_TOOLS: dict[str, dict] = {
     "list_compiled_runs": {
         "description": "List all compiled runs in the registry",
         "inputSchema": {"type": "object", "properties": {}},
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "status": {"type": "string"},
-                "count": {"type": "integer"},
-                "data": {"type": "array"},
-            },
-        },
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -444,27 +505,14 @@ BUILTIN_TOOLS: dict[str, dict] = {
 
 
 def tool_list_optimizers() -> str:
-    """List all available DSPy optimizers."""
-    return json.dumps(
-        [
-            "knn",
-            "mipro",
-            "gepa",
-            "copro",
-            "simba",
-            "grpo",
-            "infer_rules",
-            "bootstrap_few_shot",
-            "labeled_few_shot",
-            "bootstrap_few_shot_random",
-            "bootstrap_few_shot_optuna",
-            "better_together",
-            "ensemble",
-            "finetune",
-            "bootstrap_finetune",
-        ],
-        indent=2,
-    )
+    """List optimizers this server can compile with, and CLI-only families.
+
+    ``optimizers`` are the names `compile_optimizer` accepts (derived from
+    `_OPTIMIZER_SPECS`). ``cli_only`` families are available only through
+    ``dspytools compile <name>`` and are reported separately rather than being
+    advertised as callable here.
+    """
+    return json.dumps(optimizer_catalog(), indent=2)
 
 
 def tool_skills_list() -> str:
@@ -498,19 +546,23 @@ def tool_self_status() -> str:
 
 
 def tool_inspect_history(n: int = 5) -> str:
-    """Show last N LM call history entries."""
+    """Show last N LM call history entries.
 
-    old = sys.stdout
-    sys.stdout = io.StringIO()
+    DSPy 3.5's `inspect_history` accepts a `file` sink, so the process-wide
+    `sys.stdout` is never swapped (an exception used to leave the server's
+    stdout pointing at a dead StringIO for the rest of its life).
+    """
 
-    dspy.inspect_history(n=n)
-    result = sys.stdout.getvalue()
-    sys.stdout = old
-    return result[:2000]
+    buf = io.StringIO()
+    dspy.inspect_history(n=n, file=buf)
+    return buf.getvalue()[:2000]
 
 
 def tool_mlflow_status() -> str:
     """Tool: Report MLflow tracking status including async queue stats."""
+    # Imported here so the stdio startup path never imports the MLflow SDK.
+    from dspytools.core.mlflow_tracker import get_tracker
+
     tracker = get_tracker()
     tracker._ensure_initialized()
 
@@ -526,11 +578,11 @@ def tool_mlflow_status() -> str:
     return json.dumps(result, indent=2)
 
 
+@_lm_tool
 def tool_generate_llms_txt(target: str, local: bool = False, output: str = "") -> str:
     """Generate llms.txt for a repository."""
-    _ensure_lm_configured()
     repo_url = target
-    file_tree, readme, packages, history = gather_repository_info(
+    file_tree, readme, packages, _history = gather_repository_info(
         str(target) if local else ""
     )
     analyzer = RepositoryAnalyzer()
@@ -550,32 +602,92 @@ def tool_generate_llms_txt(target: str, local: bool = False, output: str = "") -
     )
 
 
+@_lm_tool
 def tool_compile_optimizer(optimizer: str, module_name: str, trainset_path: str) -> str:
-    """Trigger a DSPy compile with a specific optimizer."""
-    _ensure_lm_configured()
+    """Trigger a DSPy compile with a specific optimizer.
+
+    Accepts any name from `list_optimizers`' ``optimizers`` list (the
+    `_OPTIMIZER_SPECS` keys) plus the legacy underscore spellings. Two
+    contracts matter here:
+
+    - the spec's ``params`` dict is owned by the process-wide optimizer table,
+      so it is copied before the teacher LM is attached. Writing the teacher
+      (and its ``api_key``) into the shared dict used to poison every later
+      compile — including the CLI's.
+    - Golden Rule 3: `HoldoutGate.split()` runs **before** the optimizer is
+      constructed and only the train split reaches `compile`.
+    """
+    canonical = _canonical_optimizer_name(optimizer)
+    if canonical in _CLI_ONLY_OPTIMIZERS:
+        return _error(
+            f"Optimizer '{canonical}' is not callable through this tool",
+            detail=(
+                f"{_CLI_ONLY_OPTIMIZERS[canonical]}. Run it from the CLI: "
+                f"`dspytools compile {canonical} --help`."
+            ),
+        )
+    spec = _optimizer_specs().get(canonical)
+    if spec is None:
+        return _error(
+            f"Unknown optimizer: {optimizer}",
+            detail=(
+                "Call list_optimizers for the callable names: "
+                + ", ".join(sorted(_optimizer_specs()))
+            ),
+        )
+
     student = load_module_by_name(module_name)
     trainset = load_trainset(trainset_path)
-    spec = _OPTIMIZER_SPECS.get(optimizer)
-    if not spec:
-        return _error(f"Unknown optimizer: {optimizer}")
-    extra = spec.get("params", {})
+    if len(trainset) < 2:
+        return _error(
+            f"Trainset '{trainset_path}' has {len(trainset)} example(s)",
+            detail=(
+                "At least 2 examples are required so the holdout gate can carve "
+                "out a validation split before compiling."
+            ),
+        )
+
+    # Copy — `_OPTIMIZER_SPECS[...]["params"]` is process-wide state.
+    extra = dict(spec.get("params") or {})
+    metric: Callable = exact_match_metric()
+    if canonical == "gepa":
+        # GEPA validates a five-argument metric and needs a reflection LM.
+        metric = _gepa_feedback_metric
     if spec.get("needs_teacher"):
         teacher = LMRegistry.get_teacher()
-        if teacher:
-            extra["reflection_lm"] = teacher
-    opt = spec["lambda"](metric=exact_match_metric, **extra)
-    opt.compile(student=student, trainset=trainset)
+        if teacher is None:
+            return _error(
+                "gepa requires a teacher (reflection) LM",
+                detail=(
+                    "Configure one with `dspytools configure lm set teacher <model>` "
+                    "or set DEEPSEEK_API_KEY, then restart the MCP server."
+                ),
+            )
+        extra["reflection_lm"] = teacher
+
+    compile_id = f"mcp:{module_name}:{canonical}"
+    train_set, holdout = get_holdout_gate().split(trainset, compile_id=compile_id)
+
+    opt = spec["cls_lambda"](metric=metric, **extra)
+    opt.compile(student=student, trainset=train_set)
     return json.dumps(
         {
             "status": "compiled",
-            "optimizer": optimizer,
+            "optimizer": canonical,
             "module": module_name,
+            "trainset_size": len(train_set),
+            "holdout_size": len(holdout),
+            "compile_id": compile_id,
         }
     )
 
 
 def tool_archive_search(query: str, top_k: int = 3) -> str:
     """Search compiled program archive for similar past compilations (Meta Agent Search)."""
+    # Imported here: `dspytools.evolve` pulls the MLflow tracing SDK, which must
+    # stay off the stdio startup path.
+    from dspytools.evolve.self_evolve import get_engine
+
     engine = get_engine()
     results = engine.archive_search(query, top_k=top_k)
     return json.dumps(results, indent=2, default=str)
@@ -593,6 +705,8 @@ def tool_validate_deploy(
     if holdout_path:
         data = read_json(holdout_path)
         holdout = [dspy.Example(**item) for item in data]
+    from dspytools.evolve.self_evolve import get_engine
+
     engine = get_engine()
     result = engine.validate_and_deploy(
         None, program_id, holdout, alpha=alpha, beta=beta
@@ -620,9 +734,13 @@ def tool_sandbox_stats() -> str:
     return json.dumps(pool.stats, indent=2)
 
 
+@_lm_tool
 def tool_gfl_run_halving(module_name: str, trainset_path: str) -> str:
     """Run GFL pipeline with Successive Halving early pruning."""
-    _ensure_lm_configured()
+    # `dspytools.gfl` imports the MLflow tracing SDK via `evolve`; keep it off
+    # the stdio startup path.
+    from dspytools.gfl.pipeline import GFLPipeline
+
     student = load_module_by_name(module_name)
     trainset = load_trainset(trainset_path)
     pipeline = GFLPipeline()
@@ -638,8 +756,11 @@ def tool_gfl_run_halving(module_name: str, trainset_path: str) -> str:
     )
 
 
+@_lm_tool
 def tool_challenger_solver(rounds: int = 5) -> str:
     """Run R-Zero Challenger-Solver co-evolution."""
+    from dspytools.gfl.synthetic import ChallengerSolver
+
     challenger = dspy.Predict("difficulty, previous_tasks -> task")
     solver = dspy.Predict("task -> output")
     cs = ChallengerSolver(challenger_program=challenger, solver_program=solver)
@@ -647,25 +768,39 @@ def tool_challenger_solver(rounds: int = 5) -> str:
     return json.dumps(result, indent=2, default=str)
 
 
+@_lm_tool
 def tool_meta_prompt_learn(tasks_json: str = "", iterations: int = 5) -> str:
-    """Meta-learn system prompts across tasks (MetaSPO)."""
+    """Meta-learn system prompts across tasks (MetaSPO).
+
+    Scores are only reported when the optimizer actually measured them: with no
+    tasks/devsets there is nothing to evaluate, so the payload says
+    ``status: not_evaluated`` instead of inventing a 0.5 score.
+    """
     # If tasks_json provided, parse it; otherwise use empty dicts (self-test)
     tasks = {}
     devsets = {}
     if tasks_json:
         data = _j.loads(tasks_json)
         tasks = {k: dspy.Predict("input -> output") for k in data}
+    from dspytools.gfl.paper_optimizers import MetaPromptOptimizer
+
     opt = MetaPromptOptimizer()
     result = opt.meta_learn(
         task_programs=tasks, dev_sets=devsets, num_iterations=iterations
     )
-    return json.dumps(
-        {
-            "final_score": result.get("final_score", 0.5),
-            "meta_prompt": result.get("final_meta_prompt", "")[:500],
-        },
-        indent=2,
-    )
+    payload: dict[str, Any] = {
+        "meta_prompt": (result.get("final_meta_prompt") or "")[:500],
+    }
+    if tasks and result.get("final_score") is not None:
+        payload["final_score"] = result["final_score"]
+        payload["iterations"] = result.get("iterations", [])
+    else:
+        payload["final_score"] = None
+        payload["status"] = "not_evaluated"
+        payload["reason"] = (
+            "no task programs/devsets were supplied, so no score could be measured"
+        )
+    return json.dumps(payload, indent=2)
 
 
 def tool_compile_cost(run_id: str) -> str:
@@ -771,14 +906,18 @@ def tool_drift_auto_fix(dry_run: bool = True) -> str:
     )
 
 
+@_lm_tool
 def tool_stream_infer(input_text: str, program_id: str = "") -> str:
     """Run inference with the active compiled program (simulated streaming).
 
     Returns full output with token count metadata.
+
+    The module-level `_get_hotswap()` manager is used (not a fresh
+    `HotSwapManager()`): swaps and the LRU cache are process state, and
+    `mgr.swap()` on a throwaway instance mutated an object nobody kept.
     """
 
-    _ensure_lm_configured()
-    mgr = HotSwapManager()  # lazy — no load_all()
+    mgr = _get_hotswap()
 
     if program_id:
         mgr.swap(program_id)  # auto-loads single program on demand
@@ -815,11 +954,21 @@ def tool_analysis_cache_invalidate(key: str = "") -> str:
     )
 
 
+@_lm_tool
 def tool_doctor() -> str:
-    """Run system diagnostics — LLM health, GPU status, config, dependencies."""
-    # Quick health checks
-    checks = {"llm": False, "gpu": False, "dspy": True, "mlflow": False}
-    details = {}
+    """Run system diagnostics — LLM health, GPU status, config, dependencies.
+
+    Every check is a measurement: ``dspy`` reports whether an LM is actually
+    configured (not a hardcoded True), and the MLflow probe imports the SDK
+    on demand so server import stays light.
+    """
+    checks = {
+        "llm": False,
+        "gpu": False,
+        "dspy": getattr(dspy.settings, "lm", None) is not None,
+        "mlflow": False,
+    }
+    details = {"dspy_version": getattr(dspy, "__version__", "unknown")}
 
     # LLM check
     try:
@@ -858,11 +1007,14 @@ def tool_doctor() -> str:
         _log.error("doctor_gpu_check_failed", error=str(e))
         details["gpu_error"] = str(e)
 
-    # MLflow check
+    # MLflow check — imported here (not at module import) so the stdio startup
+    # path never pulls the MLflow SDK in.
     try:
+        import mlflow
+
         details["mlflow_tracking_uri"] = mlflow.get_tracking_uri()
         checks["mlflow"] = True
-    except (ConnectionError, OSError) as e:
+    except (ConnectionError, OSError, ImportError) as e:
         _log.error("doctor_mlflow_check_failed", error=str(e))
         details["mlflow_error"] = str(e)
 
@@ -876,6 +1028,7 @@ def tool_doctor() -> str:
     )
 
 
+@_lm_tool
 def tool_trace2skill_evolve(
     program_id: str, tasks_json: str = "", skill_name: str = "trace2skill"
 ) -> str:
@@ -887,8 +1040,8 @@ def tool_trace2skill_evolve(
       3. Consolidate — hierarchical merge with inductive reasoning
     """
 
-    mgr = HotSwapManager()
-    mgr.load_all()
+    mgr = _get_hotswap()
+    mgr._ensure_index()
 
     try:
         mgr.swap(program_id)
@@ -896,7 +1049,7 @@ def tool_trace2skill_evolve(
         _log.warning("program_swap_failed", error=str(e))
         return _error(f"Program '{program_id}' not found")
 
-    program = mgr._loaded.get(program_id)
+    program = mgr.get(program_id)
     if program is None:
         return _error(f"Program '{program_id}' not loaded")
 
@@ -905,6 +1058,8 @@ def tool_trace2skill_evolve(
         tasks = json.loads(tasks_json)
     else:
         tasks = [{"input": {"input": "hello"}, "expected": "Hello, World!"}]
+
+    from dspytools.gfl.consolidation import SkillConsolidator
 
     metric = exact_match_metric()
     consolidator = SkillConsolidator()
@@ -935,6 +1090,7 @@ def tool_trace2skill_evolve(
     )
 
 
+@_lm_tool
 def tool_spin_optimize(
     module_name: str, trainset_json: str = "", num_iterations: int = 3
 ) -> str:
@@ -945,14 +1101,9 @@ def tool_spin_optimize(
     """
 
     student = load_module_by_name(module_name)
+    trainset = _parse_trainset(trainset_json)
 
-    if trainset_json:
-        raw = json.loads(trainset_json)
-        trainset = [
-            dspy.Example(**item).with_inputs(list(item.keys())[0]) for item in raw
-        ]
-    else:
-        trainset = [dspy.Example(input="hello", output="world").with_inputs("input")]
+    from dspytools.gfl.paper_optimizers import SPINOptimizer
 
     opt = SPINOptimizer(student=student)
     result = opt.iterate(trainset, num_iterations=num_iterations)
@@ -969,6 +1120,28 @@ def tool_spin_optimize(
     )
 
 
+def _parse_trainset(
+    trainset_json: str = "",
+    default_input: str = "hello",
+    default_output: str = "world",
+) -> list:
+    """Parse a JSON trainset, falling back to one documented placeholder example.
+
+    The placeholder is a *self-test* example (it is never used as compile data
+    where a real score is reported): `tool_lse_explore` skips instead of scoring
+    against it, while SPIN/OPSD keep their pre-existing self-test behaviour.
+    """
+    if trainset_json:
+        raw = json.loads(trainset_json)
+        return [
+            dspy.Example(**item).with_inputs(next(iter(item.keys()))) for item in raw
+        ]
+    return [
+        dspy.Example(input=default_input, output=default_output).with_inputs("input")
+    ]
+
+
+@_lm_tool
 def tool_opsd_purify(
     module_name: str,
     iterations: int = 3,
@@ -983,20 +1156,14 @@ def tool_opsd_purify(
     question-relevant knowledge while rejecting reference-induced shortcuts.
     Can wrap any existing optimizer for combined purify+optimize.
     """
-    _ensure_lm_configured()
     student = load_module_by_name(module_name)
-
-    if trainset_json:
-        raw = json.loads(trainset_json)
-        trainset = [
-            dspy.Example(**item).with_inputs(list(item.keys())[0]) for item in raw
-        ]
-    else:
-        trainset = [dspy.Example(input="hello", output="world").with_inputs("input")]
+    trainset = _parse_trainset(trainset_json)
 
     base_opt = None
     if base_optimizer:
         base_opt = _make_optimizer_instance(base_optimizer)
+
+    from dspytools.gfl.paper_optimizers import PurifiedOPSDOptimizer
 
     opt = PurifiedOPSDOptimizer(
         student=student,
@@ -1025,31 +1192,70 @@ def tool_opsd_purify(
     )
 
 
+def _measure(program: Any, devset: list) -> float:
+    """Score one compiled program on a devset — the only source of LSE scores."""
+    evaluator = dspy.Evaluate(
+        devset=devset,
+        metric=exact_match_metric(),
+        num_threads=1,
+        display_progress=False,
+    )
+    return float(evaluator(program).score)
+
+
+@_lm_tool
 def tool_lse_explore(
     module_name: str, trainset_json: str = "", max_depth: int = 3
 ) -> str:
     """Run LSE tree-guided evolution (arXiv 2603.18620).
 
-    Tree-guided evolution with UCB selection. Each node is an optimization attempt.
-    Tracks improvement not absolute score: r_LSE = R̄(c₁) − R̄(c₀).
+    Tree-guided evolution with UCB selection. Each node is an optimization
+    attempt; its score is a **real measurement** — the compiled program is
+    evaluated on the holdout half of ``trainset_json``. Without a trainset there
+    is nothing to measure, so the tool reports ``status: skipped`` instead of
+    inventing scores from the tree depth.
     """
+    if not (trainset_json or "").strip():
+        return json.dumps(
+            {
+                "status": "skipped",
+                "reason": (
+                    "lse_explore scores every node by evaluating the compiled "
+                    "program on the holdout split of `trainset_json`; without a "
+                    "trainset there is no measurement to report."
+                ),
+            },
+            indent=2,
+        )
 
-    _ensure_lm_configured()
     student = load_module_by_name(module_name)
+    trainset = _parse_trainset(trainset_json)
+    if len(trainset) < 2:
+        return json.dumps(
+            {
+                "status": "skipped",
+                "reason": (
+                    f"needs at least 2 examples to split a holdout; got {len(trainset)}"
+                ),
+            },
+            indent=2,
+        )
+
+    from dspytools.gfl.paper_optimizers import LSETreeExplorer
 
     lse = LSETreeExplorer(max_depth=max_depth)
     root = lse.new_root()
     results = []
+    gate = get_holdout_gate()
 
     for depth in range(max_depth):
-        for optimizer in ["bootstrap_few_shot", "mipro", "gepa"]:
+        for optimizer in ["bootstrap-few-shot", "mipro", "gepa"]:
             try:
                 opt = _make_optimizer_instance(optimizer)
-                compiled = opt.compile(
-                    student=student, trainset=_dummy_trainset(module_name)
-                )
-                compiled(input="test")
-                score = 0.5 + (depth * 0.1)
+                compile_id = f"mcp:lse:{optimizer}:{depth}"
+                train_set, holdout = gate.split(trainset, compile_id=compile_id)
+                compiled = opt.compile(student=student, trainset=train_set)
+                score = _measure(compiled, holdout)
                 node = lse.expand(root, optimizer, score, f"depth={depth}")
                 selected = lse.select(node)
                 results.append(
@@ -1057,13 +1263,19 @@ def tool_lse_explore(
                         "depth": depth,
                         "optimizer": optimizer,
                         "score": score,
+                        "scored_on": f"holdout[{len(holdout)}]",
                         "selected": selected,
                     }
                 )
             except (RuntimeError, OSError, ValueError, TypeError) as e:
                 _log.warning("lse_tree_node_failed", error=str(e))
                 results.append(
-                    {"depth": depth, "optimizer": optimizer, "status": "failed"}
+                    {
+                        "depth": depth,
+                        "optimizer": optimizer,
+                        "status": "failed",
+                        "error": str(e),
+                    }
                 )
 
     return json.dumps(
@@ -1082,6 +1294,8 @@ def tool_gepa_frontier(module_name: str, scores_json: str = "") -> str:
     Pareto frontier optimization with coverage-weighted selection.
     Candidates dominate if score not exceeded by any frontier member.
     """
+
+    from dspytools.gfl.paper_optimizers import GEPAParetoFrontier
 
     frontier = GEPAParetoFrontier()
 
@@ -1126,23 +1340,35 @@ def _gepa_feedback_metric(
 
 
 def _make_optimizer_instance(name: str):
-    """Helper to create optimizer instances for MCP tools.
+    """Construct an optimizer from the shared `_OPTIMIZER_SPECS` table.
 
-    GEPA needs two things the shared `exact_match_metric()` factory cannot
-    supply: a five-argument metric and a reflection LM. The reflection LM is
-    always the teacher role (`LMRegistry.get_teacher()`) — it is never
+    Accepts any listed optimizer name (hyphenated canonical spelling) plus the
+    legacy underscore aliases, so a name from `list_optimizers` always resolves
+    here too. GEPA needs two things the shared `exact_match_metric()` factory
+    cannot supply: a five-argument metric and a reflection LM. The reflection LM
+    is always the teacher role (`LMRegistry.get_teacher()`) — it is never
     satisfied by the student, and a missing teacher raises instead of silently
     degrading the tool run.
     """
-    metric = exact_match_metric()
-    if name == "bootstrap_few_shot":
-        # Demo caps stay at the DSPy defaults (labeled 16 / bootstrapped 4) so the
-        # MCP path matches `compile bootstrap-few-shot`; DSPy clamps both to the
-        # trainset size, so a small devset cannot inflate the run.
-        return dspy.BootstrapFewShot(metric=metric)
-    if name == "mipro":
-        return dspy.MIPROv2(metric=metric, auto="light")
-    if name == "gepa":
+    canonical = _canonical_optimizer_name(name)
+    if canonical in _CLI_ONLY_OPTIMIZERS:
+        raise ValueError(
+            f"Optimizer '{canonical}' exists only as a CLI command "
+            f"(`dspytools compile {canonical}`): {_CLI_ONLY_OPTIMIZERS[canonical]}"
+        )
+    spec = _optimizer_specs().get(canonical)
+    if spec is None:
+        raise ValueError(
+            f"Unknown optimizer: {name}. Available: "
+            + ", ".join(sorted(_optimizer_specs()))
+        )
+
+    # Copy: the spec's params dict is process-wide state.
+    params = dict(spec.get("params") or {})
+    metric: Any = exact_match_metric()
+    if canonical == "gepa":
+        metric = _gepa_feedback_metric
+    if spec.get("needs_teacher"):
         teacher = LMRegistry.get_teacher()
         if teacher is None:
             raise ValueError(
@@ -1150,15 +1376,8 @@ def _make_optimizer_instance(name: str):
                 "`dspytools configure lm set teacher <model>` (or set "
                 "DEEPSEEK_API_KEY) and retry. LMRegistry.get_teacher() returned None."
             )
-        return dspy.GEPA(
-            metric=_gepa_feedback_metric, auto="light", reflection_lm=teacher
-        )
-    return dspy.LabeledFewShot(k=3)
-
-
-def _dummy_trainset(module_name: str) -> list:
-    """Create a minimal trainset for MCP tool demos."""
-    return [dspy.Example(input="test", output="output").with_inputs("input")]
+        params["reflection_lm"] = teacher
+    return spec["cls_lambda"](metric=metric, **params)
 
 
 # Register additional tools
@@ -1195,9 +1414,11 @@ def tool_holdout_status() -> str:
 
 _EXTRA_TOOLS = {
     "list_optimizers": {
-        "description": "List all available DSPy optimizers",
+        "description": (
+            "List optimizers compile_optimizer can run, plus CLI-only optimizer "
+            "families that it cannot"
+        ),
         "inputSchema": {"type": "object", "properties": {}},
-        "outputSchema": {"type": "array", "items": {"type": "string"}},
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -1209,7 +1430,6 @@ _EXTRA_TOOLS = {
     "skills_list": {
         "description": "List all available skills (BM25-indexed library)",
         "inputSchema": {"type": "object", "properties": {}},
-        "outputSchema": {"type": "array", "items": {"type": "object"}},
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -1228,14 +1448,6 @@ _EXTRA_TOOLS = {
             },
             "required": ["query"],
         },
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "results": {"type": "array"},
-                "count": {"type": "integer"},
-            },
-        },
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -1247,7 +1459,6 @@ _EXTRA_TOOLS = {
     "self_status": {
         "description": "Show self-optimization status (compiled help cache, self-evolve state)",
         "inputSchema": {"type": "object", "properties": {}},
-        "outputSchema": {"type": "object"},
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -1262,10 +1473,6 @@ _EXTRA_TOOLS = {
             "type": "object",
             "properties": {"n": {"type": "integer", "default": 5}},
         },
-        "outputSchema": {
-            "type": "object",
-            "properties": {"history": {"type": "string"}},
-        },
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -1277,7 +1484,6 @@ _EXTRA_TOOLS = {
     "mlflow_status": {
         "description": "Report MLflow tracking status (enabled, tracking URI, experiment)",
         "inputSchema": {"type": "object", "properties": {}},
-        "outputSchema": {"type": "object"},
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -1296,10 +1502,6 @@ _EXTRA_TOOLS = {
                 "output": {"type": "string", "default": ""},
             },
             "required": ["target"],
-        },
-        "outputSchema": {
-            "type": "object",
-            "properties": {"status": {"type": "string"}, "message": {"type": "string"}},
         },
         "annotations": {
             "readOnlyHint": False,
@@ -1320,10 +1522,6 @@ _EXTRA_TOOLS = {
             },
             "required": ["optimizer", "module_name", "trainset_path"],
         },
-        "outputSchema": {
-            "type": "object",
-            "properties": {"status": {"type": "string"}, "message": {"type": "string"}},
-        },
         "annotations": {
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -1341,14 +1539,6 @@ _EXTRA_TOOLS = {
                 "top_k": {"type": "integer", "default": 3},
             },
             "required": ["query"],
-        },
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "results": {"type": "array"},
-                "count": {"type": "integer"},
-            },
         },
         "annotations": {
             "readOnlyHint": True,
@@ -1370,10 +1560,6 @@ _EXTRA_TOOLS = {
             },
             "required": ["program_id"],
         },
-        "outputSchema": {
-            "type": "object",
-            "properties": {"status": {"type": "string"}, "message": {"type": "string"}},
-        },
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -1392,10 +1578,6 @@ _EXTRA_TOOLS = {
             },
             "required": ["code"],
         },
-        "outputSchema": {
-            "type": "object",
-            "properties": {"status": {"type": "string"}, "message": {"type": "string"}},
-        },
         "annotations": {
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -1407,7 +1589,6 @@ _EXTRA_TOOLS = {
     "sandbox_stats": {
         "description": "Get sandbox worker pool statistics (active/in-use/available)",
         "inputSchema": {"type": "object", "properties": {}},
-        "outputSchema": {"type": "object"},
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -1426,10 +1607,6 @@ _EXTRA_TOOLS = {
             },
             "required": ["module_name", "trainset_path"],
         },
-        "outputSchema": {
-            "type": "object",
-            "properties": {"status": {"type": "string"}, "message": {"type": "string"}},
-        },
         "annotations": {
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -1443,10 +1620,6 @@ _EXTRA_TOOLS = {
         "inputSchema": {
             "type": "object",
             "properties": {"rounds": {"type": "integer", "default": 5}},
-        },
-        "outputSchema": {
-            "type": "object",
-            "properties": {"status": {"type": "string"}, "message": {"type": "string"}},
         },
         "annotations": {
             "readOnlyHint": False,
@@ -1477,15 +1650,6 @@ _EXTRA_TOOLS = {
                 },
             },
             "required": ["program_id"],
-        },
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "skill_name": {"type": "string"},
-                "patches_generated": {"type": "integer"},
-                "patches_accepted": {"type": "integer"},
-                "elapsed_seconds": {"type": "number"},
-            },
         },
         "annotations": {
             "readOnlyHint": False,
@@ -1570,7 +1734,14 @@ _EXTRA_TOOLS = {
             "type": "object",
             "properties": {
                 "module_name": {"type": "string", "description": "DSPy module name"},
-                "trainset_json": {"type": "string", "default": ""},
+                "trainset_json": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "JSON array of examples; required for a real score — each "
+                        "node is evaluated on the holdout split of this data"
+                    ),
+                },
                 "max_depth": {
                     "type": "integer",
                     "default": 3,
@@ -1618,10 +1789,6 @@ _EXTRA_TOOLS = {
                 "iterations": {"type": "integer", "default": 5},
             },
         },
-        "outputSchema": {
-            "type": "object",
-            "properties": {"status": {"type": "string"}, "message": {"type": "string"}},
-        },
         "annotations": {
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -1641,14 +1808,6 @@ _EXTRA_TOOLS = {
                 }
             },
             "required": ["run_id"],
-        },
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "run_id": {"type": "string"},
-                "lineage_chain": {"type": "array"},
-                "lineage_depth": {"type": "integer"},
-            },
         },
         "annotations": {
             "readOnlyHint": True,
@@ -1680,14 +1839,6 @@ _EXTRA_TOOLS = {
             },
             "required": ["query"],
         },
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "results": {"type": "array"},
-                "count": {"type": "integer"},
-            },
-        },
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -1699,13 +1850,6 @@ _EXTRA_TOOLS = {
     "drift_status": {
         "description": "Check all compiled programs for quality drift from baseline",
         "inputSchema": {"type": "object", "properties": {}},
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "programs_tracked": {"type": "integer"},
-                "programs": {"type": "object"},
-            },
-        },
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -1724,10 +1868,6 @@ _EXTRA_TOOLS = {
             },
             "required": ["run_id"],
         },
-        "outputSchema": {
-            "type": "object",
-            "properties": {"score": {"type": "number"}, "delta": {"type": "number"}},
-        },
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -1743,10 +1883,6 @@ _EXTRA_TOOLS = {
             "properties": {
                 "dry_run": {"type": "boolean", "default": True},
             },
-        },
-        "outputSchema": {
-            "type": "object",
-            "properties": {"status": {"type": "string"}, "programs": {"type": "array"}},
         },
         "annotations": {
             "readOnlyHint": True,
@@ -1773,14 +1909,6 @@ _EXTRA_TOOLS = {
             },
             "required": ["input_text"],
         },
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "streaming": {"type": "boolean"},
-                "output": {"type": "string"},
-                "tokens": {"type": "integer"},
-            },
-        },
         "annotations": {
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -1792,13 +1920,6 @@ _EXTRA_TOOLS = {
     "compile_stats": {
         "description": "Show recent compile statistics and retry history",
         "inputSchema": {"type": "object", "properties": {}},
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "recent_runs": {"type": "integer"},
-                "runs": {"type": "array"},
-            },
-        },
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -1821,13 +1942,6 @@ _EXTRA_TOOLS = {
     "holdout_status": {
         "description": "Show holdout isolation gate status and stored splits",
         "inputSchema": {"type": "object", "properties": {}},
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "splits_stored": {"type": "integer"},
-                "ids": {"type": "array"},
-            },
-        },
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -1839,13 +1953,6 @@ _EXTRA_TOOLS = {
     "analysis_cache_stats": {
         "description": "Show analysis cache statistics (entries, disk usage, TTL)",
         "inputSchema": {"type": "object", "properties": {}},
-        "outputSchema": {
-            "type": "object",
-            "properties": {
-                "memory_entries": {"type": "integer"},
-                "disk_entries": {"type": "integer"},
-            },
-        },
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -1866,10 +1973,6 @@ _EXTRA_TOOLS = {
                 }
             },
         },
-        "outputSchema": {
-            "type": "object",
-            "properties": {"invalidated": {"type": "integer"}},
-        },
         "annotations": {
             "readOnlyHint": False,
             "destructiveHint": True,
@@ -1883,13 +1986,13 @@ _EXTRA_TOOLS = {
 BUILTIN_TOOLS.update(_EXTRA_TOOLS)
 
 
+@_lm_tool
 def tool_evaluate(module: str, devset_path: str) -> str:
     """Evaluate a module on a devset."""
 
     old_stdout = sys.stdout
     sys.stdout = io.StringIO()
     try:
-        _ensure_lm_configured()
         program = _load_program(module)
         examples = load_trainset(devset_path)
         metric = _get_metric("exact_match")
@@ -1906,6 +2009,8 @@ def tool_evaluate(module: str, devset_path: str) -> str:
 def tool_gfl_synthesize(seed_path: str, target: int = 10) -> str:
     """Generate synthetic training data from seed examples."""
 
+    from dspytools.gfl.synthetic import DataSynthesizer
+
     synth = DataSynthesizer()
     result = synth.generate(seed_path, target_count=target)
     return json.dumps(result)
@@ -1914,60 +2019,108 @@ def tool_gfl_synthesize(seed_path: str, target: int = 10) -> str:
 def _last_lm_output() -> str:
     """Return the most recent raw LM response text recorded by the active LM.
 
-    DSPy LMs append every call to `lm.history`; GEPA/ReAct failures are far
-    easier to diagnose with the model output that failed to parse, so the
-    error payload for `tool_agent_run` includes it.
+    DSPy LMs append every call to `lm.history`; lm15 entries carry
+    ``messages`` / ``prompt`` / ``outputs`` / ``response`` / ``timestamp``.
+    ``outputs`` is the documented, adapter-independent field (a list of typed
+    outputs — plain strings, ``{"text": ...}`` dicts or objects exposing
+    ``.text``); older or alternate shapes are covered by the ``response``
+    fallback. GEPA/ReAct failures are far easier to diagnose with the model
+    output that failed to parse, so `tool_agent_run`'s error payload includes
+    it.
     """
     lm = getattr(dspy.settings, "lm", None)
     history = getattr(lm, "history", None) or []
     if not history:
         return ""
     last = history[-1]
-    response = last.get("response") if isinstance(last, dict) else None
-    text = getattr(response, "text", None)
-    if text is not None:
-        return str(text)
-    return str(response) if response is not None else ""
+    if not isinstance(last, dict):
+        return str(last)
+    outputs = last.get("outputs")
+    if isinstance(outputs, (list, tuple)) and outputs:
+        first = outputs[0]
+        if isinstance(first, dict):
+            return str(first.get("text", first))
+        text = getattr(first, "text", None)
+        return str(text) if text is not None else str(first)
+    # Older/alternate entry shapes.
+    for key in ("response", "output"):
+        value = last.get(key)
+        if value is not None:
+            text = getattr(value, "text", None)
+            return str(text) if text is not None else str(value)
+    return ""
 
 
-def tool_agent_run(question: str, tools: str = "[]") -> str:
+def _configured_adapter() -> Any | None:
+    """The adapter `setup_dspy()` configured (honours config `dspy.adapter`).
+
+    `run.py` scopes work with the *active* adapter instead of rebuilding a
+    hardcoded one; `tool_agent_run` follows the same rule. No clone is needed
+    because this turn changes no adapter option — it is only scoped with
+    `dspy.context(adapter=...)`, so global settings stay untouched.
+    """
+    return getattr(dspy.settings, "adapter", None)
+
+
+def _agent_tools(tool_names: list[str]) -> list:
+    """Wrap built-in handlers as `dspy.Tool`, keeping their MCP input schemas.
+
+    `dspy.Tool(handler)` would re-derive the schema from the Python signature,
+    which loses every description/default declared in the tool spec. The spec's
+    `inputSchema` goes through the loader's `_schema_to_tool_args` so optional
+    MCP arguments are not advertised as required.
+    """
+    from dspytools.mcp.loader import _schema_to_tool_args
+
+    tools: list = []
+    for name in tool_names:
+        spec = BUILTIN_TOOLS.get(name)
+        if spec is None:
+            continue
+        args, arg_types, arg_desc = _schema_to_tool_args(spec.get("inputSchema") or {})
+        tools.append(
+            dspy.Tool(
+                spec["handler"],
+                name=name,
+                desc=spec["description"],
+                args=args,
+                arg_types=arg_types,
+                arg_desc=arg_desc,
+            )
+        )
+    return tools
+
+
+@_lm_tool
+def tool_agent_run(question: str, tools: str = "[]", max_iters: int = 8) -> str:
     """Run a ReAct agent with specified tools.
 
-    TOOLS: JSON array of tool handler names from this MCP server,
-    or empty [] for a no-tool reasoning agent.
+    TOOLS: JSON array of tool names registered in this MCP server (see
+    `list_tools`), or ``[]`` for a no-tool reasoning agent.
+    MAX_ITERS: ReAct turn budget (default 8).
 
-    A failed forced submit raises `AdapterParseError` (a ValueError *subclass
-    is not guaranteed* — `issubclass(dspy.AdapterParseError, ValueError)` is
-    False) or `ContextWindowExceededError`. Those are returned as a structured
-    error payload naming the exception and the last model output, never
-    propagated to the MCP transport.
+    The adapter is the one `setup_dspy()` configured (config `dspy.adapter`),
+    scoped with `dspy.context` — never a hardcoded `BAMLAdapter`.
+
+    A failed forced submit raises a plain `ValueError` (`react.py` raises
+    `ValueError` for both forced-submit paths; `AdapterParseError` and
+    `ContextWindowExceededError` are surfaced the same way). Those are returned
+    as a structured error payload naming the exception and the last model
+    output, never propagated to the MCP transport.
     """
 
-    _ensure_lm_configured()
-
-    # Parse tool names and wire to handler functions
     tool_names = json.loads(tools) if tools else []
-    dspy_tools: list[dspy.Tool] = []
-    for name in tool_names:
-        handler = BUILTIN_TOOLS.get(name, {}).get("handler")
-        if handler:
-            dspy_tools.append(
-                dspy.Tool(handler, name=name, desc=BUILTIN_TOOLS[name]["description"])
-            )
-
-    # BAMLAdapter is not exported at the dspy top level — import it lazily so
-    # the adapter chain stays out of every MCP server start.
-    from dspy.adapters.baml_adapter import BAMLAdapter
-
-    adapter = BAMLAdapter(
-        use_native_function_calling=False,
-    )
+    dspy_tools = _agent_tools(tool_names)
+    adapter = _configured_adapter()
     try:
         # DSPy 3.5: dspy.ReAct is the structured agent loop (typed `submit`
         # tool, History trace, termination_reason); ReActV2 is a deprecated
         # alias of it.
-        agent = dspy.ReAct("question -> answer", tools=dspy_tools, max_iters=8)
-        with dspy.context(adapter=adapter):
+        agent = dspy.ReAct("question -> answer", tools=dspy_tools, max_iters=max_iters)
+        context = (
+            dspy.context(adapter=adapter) if adapter is not None else nullcontext()
+        )
+        with context:
             result = agent(question=question)
     except Exception as e:
         # MCP handlers report in-band — see the `_error` layering contract.
@@ -1977,8 +2130,8 @@ def tool_agent_run(question: str, tools: str = "[]") -> str:
                 "exception": type(e).__name__,
                 "last_model_output": _last_lm_output()[:1000],
                 "detail": (
-                    "agent run failed (forced submit raises AdapterParseError or "
-                    "ContextWindowExceededError)"
+                    "agent run failed (a failed forced submit raises ValueError "
+                    "from dspy's react loop)"
                 ),
             }
         )
@@ -2011,16 +2164,9 @@ def tool_lora_load_adapter(name: str, path: str = "") -> str:
 
     adapter_path = Path(path) if path else _adapters_dir() / name
     if not adapter_path.exists():
-        return json.dumps(
-            {"status": "error", "error": f"Adapter not found: {adapter_path}"}
-        )
+        return _error(f"Adapter not found: {adapter_path}")
     if not (adapter_path / "adapter_model.safetensors").exists():
-        return json.dumps(
-            {
-                "status": "error",
-                "error": f"No adapter_model.safetensors in {adapter_path}",
-            }
-        )
+        return _error(f"No adapter_model.safetensors in {adapter_path}")
 
     base_model = _get_base_model()
     model_name = _adapter_model_name(name)
@@ -2045,11 +2191,33 @@ def tool_lora_load_adapter(name: str, path: str = "") -> str:
 
 
 def tool_lora_unload_adapter(name: str) -> str:
-    """Unload a LoRA adapter from llama-cpp-server."""
+    """Report LoRA adapter unload status.
 
-    model_name = name if "-lora-" in name else _adapter_model_name(name)
-    # llama-cpp doesn't have unload endpoint - just unload via system command
-    return json.dumps({"status": "unloaded", "name": model_name}, indent=2)
+    llama.cpp's server exposes no unload endpoint: an adapter is bound when the
+    model is created (`/api/generate` with `adapter`) and only disappears when
+    that derived model is removed. This tool is therefore an explicit no-op
+    rather than a fake ``{"status": "unloaded"}`` — the caller is told nothing
+    happened and what to do instead.
+    """
+
+    try:
+        model_name = name if "-lora-" in name else _adapter_model_name(name)
+    except (AttributeError, KeyError, TypeError):
+        # `_adapter_model_name` reads `lm.student` from config; an unset student
+        # entry must not turn a status report into a crash.
+        model_name = name
+    return json.dumps(
+        {
+            "status": "unsupported",
+            "name": model_name,
+            "detail": (
+                "llama.cpp has no LoRA unload endpoint; the adapter stays bound "
+                "to the derived model until the server drops that model. Restart "
+                "llama-cpp-server (or create a model without `adapter`) to unload it."
+            ),
+        },
+        indent=2,
+    )
 
 
 _FINAL_TOOLS = {
@@ -2062,10 +2230,6 @@ _FINAL_TOOLS = {
                 "devset_path": {"type": "string"},
             },
             "required": ["module", "devset_path"],
-        },
-        "outputSchema": {
-            "type": "object",
-            "properties": {"status": {"type": "string"}, "message": {"type": "string"}},
         },
         "annotations": {
             "readOnlyHint": False,
@@ -2085,10 +2249,6 @@ _FINAL_TOOLS = {
             },
             "required": ["seed_path"],
         },
-        "outputSchema": {
-            "type": "object",
-            "properties": {"status": {"type": "string"}, "message": {"type": "string"}},
-        },
         "annotations": {
             "readOnlyHint": False,
             "destructiveHint": False,
@@ -2101,12 +2261,23 @@ _FINAL_TOOLS = {
         "description": "Run a ReAct agent to answer a question",
         "inputSchema": {
             "type": "object",
-            "properties": {"question": {"type": "string"}},
+            "properties": {
+                "question": {"type": "string", "description": "Question to answer"},
+                "tools": {
+                    "type": "string",
+                    "default": "[]",
+                    "description": (
+                        "JSON array of tool names from list_tools, e.g. "
+                        '["skills_search", "graph_stats"]; "[]" runs a no-tool agent'
+                    ),
+                },
+                "max_iters": {
+                    "type": "integer",
+                    "default": 8,
+                    "description": "ReAct turn budget",
+                },
+            },
             "required": ["question"],
-        },
-        "outputSchema": {
-            "type": "object",
-            "properties": {"status": {"type": "string"}, "message": {"type": "string"}},
         },
         "annotations": {
             "readOnlyHint": False,
@@ -2305,8 +2476,9 @@ def tool_memory_delete(memory_id: str) -> str:
     """Delete a memory."""
     manager = get_memory_manager()
     result = manager.delete(memory_id)
-    # Invalidate all memory caches (user_id unknown)
-    _invalidate("memory_")
+    # Invalidate every memory cache (user_id unknown) — a glob, not a literal
+    # prefix: `_invalidate("memory_")` matched no key at all.
+    _invalidate("memory_*")
     return json.dumps({"status": "ok", "result": result})
 
 
@@ -2314,6 +2486,7 @@ def tool_memory_update(memory_id: str, content: str) -> str:
     """Update a memory's content."""
     manager = get_memory_manager()
     result = manager.update(memory_id, content)
+    _invalidate("memory_*")
     return json.dumps({"status": "ok", "result": result}, default=str)
 
 

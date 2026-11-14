@@ -40,7 +40,7 @@ class ContractLayer:
             for k in schema.get("inputs", schema.get("required", "")).split(",")
             if k.strip()
         ]
-        for fname in required:  # noqa: F402
+        for fname in required:
             if fname not in inputs:
                 violations.append(
                     ContractViolation(
@@ -101,7 +101,7 @@ class ContractLayer:
             return {}
         inputs_part, outputs_part = signature_str.split("->", 1)
         input_types, input_list = {}, []
-        for fld in inputs_part.split(","):  # noqa: F402
+        for fld in inputs_part.split(","):
             fld = fld.strip()
             if ":" in fld:
                 name, tpart = fld.split(":", 1)
@@ -111,7 +111,7 @@ class ContractLayer:
                 input_list.append(fld)
                 input_types[fld] = "str"
         output_types, output_list = {}, []
-        for fld in outputs_part.split(","):  # noqa: F402
+        for fld in outputs_part.split(","):
             fld = fld.strip()
             if ":" in fld:
                 name, tpart = fld.split(":", 1)

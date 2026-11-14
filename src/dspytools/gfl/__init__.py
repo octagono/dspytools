@@ -35,21 +35,21 @@ from dspytools.gfl.paper_optimizers import (
 from dspytools.gfl.synthetic import ChallengerSolver, DataSynthesizer
 
 __all__ = [
-    "GFLLoop",
-    "SPINOptimizer",
-    "SpinDiscriminateModule",
-    "MetaPromptOptimizer",
-    "LSETreeExplorer",
-    "LSESelfEvolveModule",
+    "ChallengerSolver",
+    "ErrorAnalystModule",
     "GEPAParetoFrontier",
+    "GFLLoop",
     "GRAOMetaOptimizer",
+    "LSESelfEvolveModule",
+    "LSETreeExplorer",
+    "MergeOperatorModule",
+    "MetaPromptOptimizer",
     "PurifiedOPSDModule",
     "PurifiedOPSDOptimizer",
-    "ChallengerSolver",
+    "SPINOptimizer",
     "SkillConsolidator",
-    "ErrorAnalystModule",
+    "SpinDiscriminateModule",
     "SuccessAnalystModule",
-    "MergeOperatorModule",
 ]
 
 

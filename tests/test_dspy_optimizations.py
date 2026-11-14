@@ -27,7 +27,8 @@ from click.testing import CliRunner
 
 from dspytools.commands import agent as agent_mod
 from dspytools.commands import run as run_mod
-from dspytools.core import cost_tracker, retry as retry_mod
+from dspytools.core import cost_tracker
+from dspytools.core import retry as retry_mod
 from dspytools.core._dspy import dspy
 
 # ── Hermetic scaffolding ───────────────────────────────────────────────────
@@ -283,7 +284,7 @@ def _run_setup_dspy(monkeypatch, cfg: dict):
     import dspytools.core.setup as setup_mod
 
     monkeypatch.setattr(setup_mod, "load_config", lambda: cfg)
-    monkeypatch.setattr(setup_mod, "load_env", lambda: {})
+    monkeypatch.setattr(setup_mod, "load_env", dict)
     monkeypatch.setattr(setup_mod, "merge_environ", lambda env=None: None)
     monkeypatch.setattr(setup_mod, "_setup_configured", False)
     lm, _ = _usage_lm()

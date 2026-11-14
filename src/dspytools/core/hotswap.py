@@ -304,9 +304,8 @@ class HotSwapManager:
         refcount reaches zero (up to 30s timeout). Use for production
         zero-downtime swaps.
         """
-        if run_id not in self._programs:
-            if not self.load_single(run_id):
-                raise KeyError(f"Program '{run_id}' not found")
+        if run_id not in self._programs and not self.load_single(run_id):
+            raise KeyError(f"Program '{run_id}' not found")
         self._programs.move_to_end(run_id)
         prev = self._active
         self._active = run_id
@@ -347,9 +346,8 @@ class HotSwapManager:
         Returns previous active ID or raises on failure.
         """
         # Ensure loaded
-        if run_id not in self._programs:
-            if not self.load_single(run_id):
-                raise KeyError(f"Program '{run_id}' not found")
+        if run_id not in self._programs and not self.load_single(run_id):
+            raise KeyError(f"Program '{run_id}' not found")
 
         # Verify: construct test input from the program's signature fields
         program = self._programs[run_id]

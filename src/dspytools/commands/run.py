@@ -7,11 +7,13 @@ import inspect
 import json
 import json as _json
 import re as _re
+import sys as _sys
 import time
+from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import dspy
@@ -200,12 +202,30 @@ def _load_tools(tool_specs: tuple[str, ...]) -> list:
             tools.append(t)
             ok(f"Loaded tool '{attr_name}' from {module_path}")
         except (ImportError, AttributeError, ValueError, TypeError):
-            hint = " in any MCP server" if ":" in spec else ""
+            if ":" in spec:
+                detail = _mcp_failure_detail()
+                suffix = f" ({detail})" if detail else ""
+                hint = f" in any MCP server{suffix}"
+            else:
+                hint = ""
             warn(
                 f"Tool '{spec}' not found{hint}. Use qualified names "
                 f"(e.g. ``math.sqrt``) or register a function first."
             )
     return tools
+
+
+def _mcp_failure_detail() -> str:
+    """Per-server MCP connection failures, when the loader was already used.
+
+    Reads the module out of ``sys.modules`` instead of importing it so a plain
+    ``run --tools math.sqrt`` never pays the MCP client import.
+    """
+
+    loader = _sys.modules.get("dspytools.mcp.loader")
+    if loader is None:
+        return ""
+    return loader.MCPSessionPool.describe_failures()
 
 
 def _load_mcp_tool(spec: str, tools: list) -> bool:

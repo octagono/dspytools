@@ -249,7 +249,7 @@ def test_cot_reasoning_prediction_is_cached_as_json():
 
 
 def test_cache_serialization_failure_is_a_miss(monkeypatch):
-    import dspytools.core.hotswap as hotswap
+    from dspytools.core import hotswap
 
     def _boom(_output):
         raise TypeError("Object of type Reasoning is not JSON serializable")
@@ -269,7 +269,7 @@ def test_cache_serialization_failure_is_a_miss(monkeypatch):
 
 
 def test_score_uses_answer_not_reasoning(monkeypatch):
-    import dspytools.core.hotswap as hotswap
+    from dspytools.core import hotswap
 
     rich_answer = "# Answer\n\n## Detail\n\n- first\n- second\n\n" + "word " * 80
     prediction = dspy.Prediction(

@@ -12,8 +12,6 @@ from typing import Any
 class DspyToolsError(Exception):
     """Base for all dspytools exceptions."""
 
-    pass
-
 
 class ServiceUnavailableError(DspyToolsError):
     """External service is unreachable (FalkorDB, Redis, llama-cpp-server, MLflow).
@@ -34,19 +32,13 @@ class ServiceUnavailableError(DspyToolsError):
 class CacheError(ServiceUnavailableError):
     """Redis or semantic cache is unavailable."""
 
-    pass
-
 
 class GraphError(ServiceUnavailableError):
     """FalkorDB graph database is unavailable."""
 
-    pass
-
 
 class LlamaCppError(ServiceUnavailableError):
     """llama-cpp-server is unreachable or model is not loaded."""
-
-    pass
 
 
 class CompileError(DspyToolsError):

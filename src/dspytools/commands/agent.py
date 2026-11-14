@@ -77,7 +77,7 @@ def _rank_tools(
     avg_len = sum(v["tf"].total() for v in index.values()) / max(N, 1)
 
     scores: list[tuple[Any, float]] = []
-    for name, entry in index.items():
+    for entry in index.values():
         dl = len(entry["tokens"])
         tf = entry["tf"]
         q_set = set(query_tokens)
@@ -126,7 +126,7 @@ def agent_new(name: str, signature: str, mcp_config: str, max_iters: int):
     inventory so `agent run` can select the right tools on-the-fly.
     """
     click.echo(f"  Loading MCP tools from {mcp_config}...")
-    sessions, tools = load_mcp_tools_sync(mcp_config)
+    _sessions, tools = load_mcp_tools_sync(mcp_config)
 
     if not tools:
         click.echo("  No MCP tools loaded. Agent will have no tools.")
@@ -245,7 +245,7 @@ def agent_run(
 
     # Load full MCP tool pool
     click.echo(f"  Loading MCP tools from {config.get('mcp_config', '.mcp.json')}...")
-    sessions, tools = load_mcp_tools_sync(config.get("mcp_config", ".mcp.json"))
+    _sessions, tools = load_mcp_tools_sync(config.get("mcp_config", ".mcp.json"))
 
     if not tools:
         click.echo("  No MCP tools available. Running without tools.")

@@ -39,8 +39,8 @@ from dspytools.config.settings import (
     adapters_dir,
     distill_dir,
     evolve_scores_path,
-    morphology_path,
     llama_cpp_url,
+    morphology_path,
     skill_graph_path,
     ucb_explorer_path,
 )

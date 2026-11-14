@@ -46,18 +46,24 @@ def skills_create(name: str, description: str, signature: str, body: str | None)
 @skills_cmd.command(name="search", cls=LLMCommand)
 @click.argument("query")
 @click.option("--k", default=5, type=int, help="Number of results")
-def skills_search(query: str, k: int):
-    """BM25 search for skills matching a query."""
+@click.option(
+    "--hybrid",
+    is_flag=True,
+    help="Add embedding similarity to BM25 (opt-in; needs the embedding server)",
+)
+def skills_search(query: str, k: int, hybrid: bool):
+    """BM25 search for skills matching a query (or --hybrid semantic search)."""
     from dspytools.skills import SkillManager
 
     mgr = SkillManager()
-    results = mgr.search(query, k)
+    results = mgr.search_hybrid(query, k) if hybrid else mgr.search(query, k)
+    label = "Hybrid Search" if hybrid else "BM25 Search"
 
     if results:
         rows = [
             [s.name, s.description[:60], "✓" if s.has_program else "✗"] for s in results
         ]
-        table(f"BM25 Search: '{query}'", ["Name", "Description", "Compiled"], rows)
+        table(f"{label}: '{query}'", ["Name", "Description", "Compiled"], rows)
     else:
         info(f"No skills match '{query}'")
 
@@ -70,17 +76,40 @@ def skills_search(query: str, k: int):
     default="labeled_few_shot",
     type=click.Choice(["labeled_few_shot", "bootstrap_few_shot"]),
 )
-def skills_compile(name: str, optimizer: str):
+@click.option(
+    "--trainset",
+    "-t",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to JSON/JSONL training examples (without it nothing is optimized)",
+)
+def skills_compile(name: str, optimizer: str, trainset: str | None):
     """Compile a skill's DSPy program."""
+    from dspytools.core.loaders import load_trainset
     from dspytools.skills import SkillManager
 
+    examples = None
+    if trainset:
+        # An optimizer that stores demos needs a configured LM.
+        from dspytools.core.setup import setup_dspy
+
+        setup_dspy()
+        examples = load_trainset(trainset)
+
     mgr = SkillManager()
-    result = mgr.compile_skill(name, optimizer=optimizer)
+    result = mgr.compile_skill(name, trainset=examples, optimizer=optimizer)
 
     if "error" in result:
         console.print(f"[red]{result['error']}[/red]")
+    elif result["optimizer"] == "none":
+        info(
+            f"Skill '{name}' saved unoptimized (no --trainset passed); "
+            "0 demos — pass --trainset to actually optimize"
+        )
     else:
-        ok(f"Skill '{name}' compiled with {result['optimizer']}")
+        ok(
+            f"Skill '{name}' compiled with {result['optimizer']} "
+            f"({result['demos']} demos from {result['trainset_size']} examples)"
+        )
 
 
 @skills_cmd.command(name="generate-from-run", cls=LLMCommand)
@@ -139,9 +168,9 @@ def skills_show(name: str):
     from dspytools.skills import SkillManager
 
     mgr = SkillManager()
-    skill = mgr.search(name, k=1)
-    if skill and skill[0].name == name:
-        md_path = skill[0].path / "SKILL.md" if skill[0].path else None
+    skill = mgr.get(name)
+    if skill:
+        md_path = skill.path / "SKILL.md" if skill.path else None
         if md_path and md_path.exists():
             console.print(md_path.read_text())
         else:

@@ -199,7 +199,6 @@ class AnalysisCache:
 
     def _load_index(self) -> None:
         """Load cached hashes from disk on startup."""
-        pass
 
     def __len__(self) -> int:
         return len(self._memory)

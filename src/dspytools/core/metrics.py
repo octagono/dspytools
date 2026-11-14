@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import re
 import string
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from dspytools.core._dspy import dspy
 from dspytools.core.loaders import prediction_output

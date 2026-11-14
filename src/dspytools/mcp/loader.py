@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 from dspytools.core._io import read_json
 from dspytools.core.logging_config import get_logger
@@ -40,6 +40,10 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 _log = get_logger(__name__)
+
+# Bound on any single cross-thread MCP operation. Without it, one hung server
+# blocks the sync caller forever (`future.result()` had no timeout).
+MCP_CALL_TIMEOUT = 120.0
 
 
 # ── Dedicated event loop thread ───────────────────────────────────────────
@@ -63,11 +67,22 @@ class _MCPEventLoop(threading.Thread):
         self._ready.set()
         self._loop.run_forever()
 
-    def run_coro(self, coro) -> Any:
-        """Run a coroutine on the dedicated loop (thread-safe, blocking)."""
+    def run_coro(self, coro, timeout: float = MCP_CALL_TIMEOUT) -> Any:
+        """Run a coroutine on the dedicated loop (thread-safe, blocking).
+
+        The wait is bounded: a hung MCP server raises `TimeoutError` to the
+        caller instead of blocking it forever.
+        """
         self._ready.wait()
         assert self._loop is not None
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            raise TimeoutError(
+                f"MCP operation timed out after {timeout:.0f}s on the MCP event loop"
+            ) from None
 
     @property
     def loop(self) -> asyncio.AbstractEventLoop:
@@ -89,6 +104,12 @@ class MCPSessionPool:
     All MCP connections live on a dedicated background event loop thread so
     that sync callers (DSPy ReAct) can dispatch tool calls without
     ClosedResourceError from mismatched event loops.
+
+    Sessions are kept for the lifetime of the process: `get_tools()` connects
+    once (or after `refresh()` / `force_reconnect=True`) and never tears a
+    working session down on a timer. Servers that failed to connect are
+    recorded in `failed_servers` so callers can report *why* the tool list is
+    empty or partial instead of claiming the tool does not exist.
     """
 
     _instance: MCPSessionPool | None = None
@@ -97,8 +118,10 @@ class MCPSessionPool:
     _sessions: list[tuple[str, Any, Any]] = []  # (name, session, list_tools_result)
     _cms: list[Any] = []  # kept-alive context managers (stdio_client)
     _last_connect: float = 0
+    _failed: list[dict[str, str]] = []  # {"server": name, "error": reason}
+    _connected_servers: list[str] = []
 
-    def __new__(cls) -> MCPSessionPool:
+    def __new__(cls) -> Self:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
@@ -116,18 +139,36 @@ class MCPSessionPool:
     def get_tools(
         cls, config_path: str = ".mcp.json", force_reconnect: bool = False
     ) -> list[dspy.Tool]:
-        """Return cached tools, reconnecting only if forced or config changed."""
-        now = time.time()
-        if force_reconnect or not cls._tools or (now - cls._last_connect > 300):
+        """Return cached tools; (re)connect only when forced or not yet connected.
+
+        There is no keepalive timer: a healthy session is never dropped just
+        because time passed (the old 300 s sweep reconmected — and briefly
+        emptied — a working pool mid-agent-turn).
+        """
+        if force_reconnect or not cls._tools:
             cls._disconnect_all()
             cls._tools = cls._connect_all(config_path)
-            cls._last_connect = now
+            cls._last_connect = time.time()
         return cls._tools
+
+    @classmethod
+    def failed_servers(cls) -> list[dict[str, str]]:
+        """Servers whose last connection attempt failed, with the reason."""
+        return list(cls._failed)
+
+    @classmethod
+    def describe_failures(cls) -> str:
+        """One-line, human-readable summary of failed MCP server connections."""
+        if not cls._failed:
+            return ""
+        return "; ".join(f"{f['server']}: {f['error']}" for f in cls._failed)
 
     @classmethod
     def _connect_all(cls, config_path: str) -> list[dspy.Tool]:
         """Connect to all MCP servers and create sync-wrapped DSPy tools."""
         cfg_path = Path(config_path)
+        cls._failed = []
+        cls._connected_servers = []
         if not cfg_path.exists():
             return []
         config = read_json(cfg_path)
@@ -168,12 +209,19 @@ class MCPSessionPool:
 
                     cls._sessions.append((name, session, result))
                     cls._cms.append(cm)
+                    cls._connected_servers.append(name)
 
                 except (ConnectionError, OSError, TimeoutError, RuntimeError) as e:
-                    _log.warning(
-                        "MCP [%s]: connection failed (%s)", name, type(e).__name__
-                    )
+                    reason = f"{type(e).__name__}: {e}"
+                    cls._failed.append({"server": name, "error": reason})
+                    _log.error("MCP server [%s] failed to connect (%s)", name, reason)
 
+            if cls._failed:
+                _log.error(
+                    "MCP servers unavailable: %s (connected: %s)",
+                    cls.describe_failures(),
+                    ", ".join(cls._connected_servers) or "none",
+                )
             return all_tools
 
         with _suppress_stderr():
@@ -187,17 +235,47 @@ class MCPSessionPool:
             cls._sessions.clear()
             cls._cms.clear()
             cls._tools.clear()
+            cls._connected_servers.clear()
 
         if cls._loop and cls._loop.is_alive():
             cls._loop.run_coro(_cleanup())
+        else:
+            cls._tools.clear()
 
     @classmethod
     def refresh(cls) -> None:
-        """Force reconnection on next get_tools() call."""
+        """Drop the cached tools so the next `get_tools()` reconnects.
+
+        This is what a forced reconnect means: the cached tool list is cleared
+        here, and `get_tools()` re-runs `_connect_all()`. (It used to only reset
+        a timestamp, which the timer has since stopped reading.)
+        """
         cls._last_connect = 0
+        cls._tools = []
 
 
 # ── Sync wrapper tool factory ─────────────────────────────────────────────
+
+
+class MCPToolError(RuntimeError):
+    """An external MCP tool call failed (`result.is_error`).
+
+    Raised instead of returning the error text as a normal result, so the
+    agent cannot proceed as if the call succeeded.
+    """
+
+    def __init__(self, tool_name: str, message: str) -> None:
+        super().__init__(f"MCP tool '{tool_name}' failed: {message}")
+        self.tool_name = tool_name
+        self.message = message
+
+
+def _result_text(result: Any) -> str:
+    """Join the text parts of an MCP call result (media parts are dropped)."""
+    if hasattr(result, "content"):
+        texts = [c.text for c in result.content if hasattr(c, "text") and c.text]
+        return "\n".join(texts)
+    return ""
 
 
 def _make_sync_tool(
@@ -221,15 +299,19 @@ def _make_sync_tool(
     loop = pool._get_loop()
 
     def _call(**kwargs: Any) -> Any:
-        """Sync wrapper — runs session.call_tool on the MCP event loop."""
+        """Sync wrapper — runs session.call_tool on the MCP event loop.
+
+        Text-only by design (image/file parts are dropped; see AGENTS.md).
+        A failed external tool is **not** silently turned into plausible text:
+        `result.is_error` raises, mirroring DSPy's own `convert_mcp_tool`.
+        """
         result = loop.run_coro(
             session.call_tool(name, arguments=kwargs if kwargs else None)
         )
-        # Extract text content from MCP result
-        if hasattr(result, "content"):
-            texts = [c.text for c in result.content if hasattr(c, "text") and c.text]
-            return "\n".join(texts) if texts else str(result)
-        return str(result)
+        text = _result_text(result)
+        if getattr(result, "is_error", False) or getattr(result, "isError", False):
+            raise MCPToolError(name, text or "MCP tool reported an error")
+        return text if text else str(result)
 
     # Build DSPy Tool — DSPy's own converter preserves descriptions and the
     # JSON-schema fragments (nested objects, anyOf, ...) that a hand-rolled
@@ -335,8 +417,19 @@ class _suppress_stderr:
 def load_mcp_tools_sync(config_path: str = ".mcp.json") -> tuple[list, list[dspy.Tool]]:
     """Compatibility wrapper — returns (sessions, tools) like before.
 
-    Uses MCPSessionPool internally for connection reuse.
+    Uses MCPSessionPool internally for connection reuse. When the pool comes
+    back empty or partial, `MCPSessionPool.failed_servers()` carries the
+    per-server reasons (also logged at ERROR) — "connected to nothing" is never
+    silent.
     """
     pool = MCPSessionPool()
     tools = pool.get_tools(config_path)
+    failures = pool.failed_servers()
+    if failures:
+        _log.error(
+            "mcp_partial_connection: %d/%d server(s) failed (%s)",
+            len(failures),
+            len(failures) + len(pool._connected_servers),
+            pool.describe_failures(),
+        )
     return pool._sessions, tools

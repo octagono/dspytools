@@ -119,7 +119,7 @@ class TestSandboxPoolFallback:
 
         pool = SandboxPool(pool_size=1, timeout=5.0)
         # Acquire the only worker
-        idx, proc = pool._acquire()
+        idx, _proc = pool._acquire()
         assert idx is not None
         # Second call should fall back
         result = pool.execute("print('fallback')")
@@ -218,7 +218,7 @@ class TestSandboxPoolStats:
         from dspytools.generate.module import SandboxPool
 
         pool = SandboxPool(pool_size=2, timeout=5.0)
-        idx, proc = pool._acquire()
+        idx, _proc = pool._acquire()
         assert idx is not None
         s = pool.stats
         assert s["workers_in_use"] == 1

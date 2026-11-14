@@ -103,7 +103,7 @@ class RedisCache:
             if cursor == 0:
                 break
         prefix = f"{self._ns}:"
-        return [k[len(prefix) :] if k.startswith(prefix) else k for k in keys]
+        return [k.removeprefix(prefix) for k in keys]
 
     def keys(self, pattern: str = "*") -> list[str]:
         """List keys matching a pattern (within this namespace)."""

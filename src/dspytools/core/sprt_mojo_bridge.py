@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import math
 from types import ModuleType
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -28,7 +28,7 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 HAS_MOJO: bool = False
-_mojo_module: Optional[ModuleType] = None
+_mojo_module: ModuleType | None = None
 
 HAS_MOJO, _mojo_module = try_load_mojo("sprt", "sprt_evaluate", logger)
 

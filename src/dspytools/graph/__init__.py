@@ -9,7 +9,7 @@ from dspytools.graph.client import GraphClient, get_graph_client
 from dspytools.graph.skill_graph import FalkorDBSkillGraph
 
 __all__ = [
+    "FalkorDBSkillGraph",
     "GraphClient",
     "get_graph_client",
-    "FalkorDBSkillGraph",
 ]

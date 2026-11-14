@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Callable, TypeVar
+from collections.abc import Callable
+from typing import Any, Self, TypeVar
 
 import redis
 from falkordb import FalkorDB
@@ -104,7 +105,7 @@ class GraphClient:
 
     _instance: GraphClient | None = None
 
-    def __new__(cls) -> GraphClient:
+    def __new__(cls) -> Self:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False

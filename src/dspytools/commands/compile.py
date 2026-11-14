@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import inspect
 import json
-from typing import Any, Callable
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 from dspytools.cli.output import fail, force_option, label_option, panel, table
 from dspytools.cli.rich_config import LLMCommand, LLMGroup, click
@@ -245,25 +247,51 @@ def _gepa_cli_kwargs(
 def _instruction_proposer() -> Any:
     """Build GEPA's ``InstructionProposer`` over the local skills library.
 
-    ``~/.config/dspytools/skills/*/SKILL.md`` is exactly the directory layout
-    ``InstructionProposer(skills=...)`` consumes, so the teacher's reflections
-    get the mined Trace2Skill patterns as priors. ``truncate_history_outputs``
-    keeps the reflection prompt inside the budget of a small reflection model.
+    ``InstructionProposer(skills=...)`` takes one source *per skill* — a path to
+    a file, or to a directory that itself holds ``SKILL.md``. Passing the
+    library root raised ``FileNotFoundError`` (no ``SKILL.md`` at the root), so
+    ``--gepa-skills`` never worked. Each skill directory is passed instead, and
+    an empty library is an actionable error rather than a bare traceback.
+    ``truncate_history_outputs`` keeps the reflection prompt inside the budget
+    of a small reflection model.
     """
     from dspy.teleprompt.gepa.instruction_proposal import InstructionProposer
 
     from dspytools.config.settings import skills_dir
 
-    skills_path = skills_dir()
-    if not skills_path.exists():
-        raise click.ClickException(
-            f"no skills library at {skills_path} — create one with `dspytools skills create`"
+    root = skills_dir()
+    skill_paths: list[Path] = []
+    if root.is_dir():
+        skill_paths = sorted(
+            (
+                entry
+                for entry in root.iterdir()
+                if entry.is_dir()
+                and not entry.name.startswith(".")
+                and (entry / "SKILL.md").is_file()
+            ),
+            key=lambda entry: entry.name,
         )
-    return InstructionProposer(
-        skills=skills_path,
-        max_chars=2000,
-        truncate_history_outputs=True,
-    )
+    if not skill_paths:
+        raise click.ClickException(
+            f"no skills found in {root} — --gepa-skills needs at least one "
+            "skill directory containing SKILL.md; create one with "
+            "`dspytools skills create`"
+        )
+    try:
+        return InstructionProposer(
+            skills=[str(path) for path in skill_paths],
+            max_chars=2000,
+            truncate_history_outputs=True,
+        )
+    except ValueError as exc:
+        # Libraries created before `create_skill` quoted its scalars may hold
+        # unquoted `": "` / `" #"` descriptions; name the fix instead of
+        # surfacing the parser's bare "Invalid YAML skill frontmatter."
+        raise click.ClickException(
+            f"a skill under {root} has invalid YAML frontmatter ({exc}) — "
+            "recreate it with `dspytools skills create`"
+        ) from exc
 
 
 def _json_safe_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -1621,7 +1649,7 @@ def compile_gfl(
     if validate:
         engine = SelfEvolveEngine()
         # Create holdout from trainset
-        train_set, holdout = GFLPipeline.split_holdout(trainset, holdout_fraction=0.2)
+        _train_set, holdout = GFLPipeline.split_holdout(trainset, holdout_fraction=0.2)
         if holdout:
             val_result = engine.validate_and_deploy(
                 candidate_program=result.get("best_program", student),

@@ -118,7 +118,7 @@ def load_trainset(path: str) -> list:
         elif "inputs" in item:
             ex = ex.with_inputs(*item["inputs"])
         elif item:
-            first_key = list(item.keys())[0]
+            first_key = next(iter(item.keys()))
             ex = ex.with_inputs(first_key)
         examples.append(ex)
     return examples

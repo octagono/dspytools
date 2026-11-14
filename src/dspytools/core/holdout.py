@@ -10,7 +10,7 @@ import functools
 import hashlib
 import math
 import random
-from typing import Callable
+from collections.abc import Callable
 
 from dspytools.config.settings import DEFAULT_SEED
 
@@ -164,7 +164,7 @@ def gated_compile(compile_fn: Callable, holdout_fraction: float = 0.2):
         )
 
         # Auto-split
-        train, holdout = gate.split(trainset, compile_id)
+        train, _holdout = gate.split(trainset, compile_id)
 
         # Only pass train to optimizer
         result = compile_fn(student, train, *args, **kwargs)
