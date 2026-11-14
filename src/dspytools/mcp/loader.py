@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 from dspytools.core._io import read_json
 from dspytools.core.logging_config import get_logger
@@ -114,12 +114,13 @@ class MCPSessionPool:
 
     _instance: MCPSessionPool | None = None
     _loop: _MCPEventLoop | None = None
-    _tools: list[dspy.Tool] = []
-    _sessions: list[tuple[str, Any, Any]] = []  # (name, session, list_tools_result)
-    _cms: list[Any] = []  # kept-alive context managers (stdio_client)
+    _tools: ClassVar[list[dspy.Tool]] = []
+    # (name, session, list_tools_result)
+    _sessions: ClassVar[list[tuple[str, Any, Any]]] = []
+    _cms: ClassVar[list[Any]] = []  # kept-alive context managers (stdio_client)
     _last_connect: float = 0
-    _failed: list[dict[str, str]] = []  # {"server": name, "error": reason}
-    _connected_servers: list[str] = []
+    _failed: ClassVar[list[dict[str, str]]] = []  # {"server": name, "error": reason}
+    _connected_servers: ClassVar[list[str]] = []
 
     def __new__(cls) -> Self:
         if cls._instance is None:

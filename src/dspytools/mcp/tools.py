@@ -996,6 +996,7 @@ def tool_doctor() -> str:
                 "--query-gpu=name,memory.used,memory.total",
                 "--format=csv,noheader,nounits",
             ],
+            check=False,
             capture_output=True,
             text=True,
             timeout=5,
@@ -2122,7 +2123,7 @@ def tool_agent_run(question: str, tools: str = "[]", max_iters: int = 8) -> str:
         )
         with context:
             result = agent(question=question)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — AdapterParseError is not a ValueError
         # MCP handlers report in-band — see the `_error` layering contract.
         return json.dumps(
             {

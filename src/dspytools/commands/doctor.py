@@ -201,6 +201,7 @@ def doctor_cmd(
                 "--query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu",
                 "--format=csv,noheader,nounits",
             ],
+            check=False,
             capture_output=True,
             text=True,
             timeout=5,

@@ -22,6 +22,8 @@ Coverage:
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 from click.testing import CliRunner
 
@@ -378,7 +380,9 @@ def test_add_result_falls_back_to_lm_history():
 
 def test_cached_call_records_nothing():
     class Cached:
-        history = [{"model": "openai/stub-model", "usage": None, "cost": None}]
+        history: ClassVar[list[dict]] = [
+            {"model": "openai/stub-model", "usage": None, "cost": None}
+        ]
 
     cost = cost_tracker.CompileCost(compile_id="run-3", optimizer="mipro")
     assert cost.add_result(object(), Cached()) == 0
@@ -475,10 +479,12 @@ def test_parallel_context_is_a_noop_when_disabled():
 def test_parallel_context_requires_function_calling():
     lm = dspy.utils.DummyLM([{"answer": "4"}])
     assert lm.supports_function_calling is False
-    with dspy.context(lm=lm, adapter=dspy.ChatAdapter()):
-        with pytest.raises(run_mod.click.ClickException) as err:
-            with run_mod._parallel_tools_context(True):
-                pass
+    with (
+        dspy.context(lm=lm, adapter=dspy.ChatAdapter()),
+        pytest.raises(run_mod.click.ClickException) as err,
+        run_mod._parallel_tools_context(True),
+    ):
+        pass
     assert "native function calling" in str(err.value)
 
 

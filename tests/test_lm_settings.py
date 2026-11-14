@@ -19,6 +19,8 @@ Coverage:
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 from click.testing import CliRunner
 
@@ -353,7 +355,11 @@ def test_cache_show_reports_persisted_state(monkeypatch, tmp_path):
 class _ResponseFormatRejectingEngine:
     """Rejects requests carrying response_format, accepts plain chat requests."""
 
-    supported_params = {"response_format", "temperature", "max_tokens"}
+    supported_params: ClassVar[set[str]] = {
+        "response_format",
+        "temperature",
+        "max_tokens",
+    }
     supports_response_schema = True
     supports_function_calling = False
 
@@ -402,7 +408,7 @@ def test_response_format_retry_not_used_without_response_format(monkeypatch, _he
     from dspy.utils.exceptions import LMError
 
     class _FailingEngine:
-        supported_params = {"temperature", "max_tokens"}
+        supported_params: ClassVar[set[str]] = {"temperature", "max_tokens"}
         supports_response_schema = False
         supports_function_calling = False
 

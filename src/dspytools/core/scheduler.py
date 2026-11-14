@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from typing import ClassVar
 
 from dspytools.core.logging_config import get_logger
 
@@ -48,7 +49,7 @@ class CompileScheduler:
     """
 
     _executor = ThreadPoolExecutor(max_workers=2)
-    _jobs: dict[str, CompileJob] = {}
+    _jobs: ClassVar[dict[str, CompileJob]] = {}
     _lock = threading.Lock()
 
     @classmethod

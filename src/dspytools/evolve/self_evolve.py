@@ -1378,6 +1378,7 @@ print(f"Adapter saved to adapters/{adapter_name}/")
                 "--query-gpu=memory.used,memory.total,memory.free",
                 "--format=csv,noheader,nounits",
             ],
+            check=False,
             capture_output=True,
             text=True,
             timeout=5,

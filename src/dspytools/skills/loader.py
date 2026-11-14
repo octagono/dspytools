@@ -251,7 +251,7 @@ class SkillLoader:
                 )
                 for name, vector in vectors.items()
             }
-        except Exception as exc:  # optional backend — degrade, never fail
+        except Exception as exc:  # noqa: BLE001 — optional backend, degrade to BM25
             _log.warning("skill_embeddings_unavailable", error=str(exc))
             return self.search(query, k)
 

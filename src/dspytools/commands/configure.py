@@ -214,7 +214,7 @@ def _resolve_safe_types(specs: tuple[str, ...]) -> list[type] | None:
 
     try:
         return resolve_safe_types(specs)
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 
@@ -539,6 +539,7 @@ def _generate_completion_script(shell: str) -> str:
     result = subprocess.run(
         ["dspytools"],
         env=env,
+        check=False,
         capture_output=True,
         text=True,
     )
@@ -548,6 +549,7 @@ def _generate_completion_script(shell: str) -> str:
         result = subprocess.run(
             [sys.executable, "-c", "from dspytools.main import cli; cli()"],
             env=env,
+            check=False,
             capture_output=True,
             text=True,
         )

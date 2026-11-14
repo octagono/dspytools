@@ -89,7 +89,7 @@ print(y)"""
         def run():
             try:
                 results.append(_pool.execute("print('concurrent')"))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — collect worker errors
                 errors.append(e)
 
         t1 = threading.Thread(target=run)

@@ -104,7 +104,7 @@ def _dispatch(name: str, arguments: dict[str, Any] | None) -> str:
                 ),
             }
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — handlers report errors in-band
         _log.error(
             "MCP tool unexpected error: tool=%s error=%s", name, e, exc_info=True
         )

@@ -448,7 +448,10 @@ def test_importing_skills_pulls_no_numpy_redis_or_falkordb():
         "print(','.join(heavy))\n"
     )
     completed = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == ""

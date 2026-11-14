@@ -99,9 +99,9 @@ class DataSynthesizer:
     def _paraphrase(self, seed: dict) -> dict | None:
         """Paraphrase a seed example keeping structure but changing wording."""
         result = dict(seed)
-        for key in seed:
-            if isinstance(seed[key], str) and len(seed[key]) > 20:
-                new_val = self._llm_paraphrase(seed[key])
+        for key, value in seed.items():
+            if isinstance(value, str) and len(value) > 20:
+                new_val = self._llm_paraphrase(value)
                 if new_val and len(new_val) > 10:
                     result[key] = new_val
         return result
@@ -122,15 +122,15 @@ class DataSynthesizer:
     def _vary_complexity(self, seed: dict, detailed: bool = True) -> dict | None:
         """Make an example simpler or more detailed."""
         result = dict(seed)
-        for key in seed:
-            if isinstance(seed[key], str) and len(seed[key]) > 30:
+        for key, value in seed.items():
+            if isinstance(value, str) and len(value) > 30:
                 if detailed:
                     result[key] = (
-                        seed[key]
+                        value
                         + "\n\nAdditional details from the README and source code analysis follow..."
                     )
                 else:
-                    result[key] = seed[key].split("\n")[0]
+                    result[key] = value.split("\n")[0]
         return result
 
     def _llm_paraphrase(self, text: str) -> str | None:

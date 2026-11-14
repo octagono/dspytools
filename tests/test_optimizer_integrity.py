@@ -17,6 +17,7 @@ network is touched.
 from __future__ import annotations
 
 import inspect
+from typing import ClassVar
 
 import pytest
 from click.testing import CliRunner
@@ -53,7 +54,7 @@ class _FakeCompiled:
 class _FakeGEPA:
     """Signature-compatible GEPA stand-in that records what it was given."""
 
-    constructed: list[_FakeGEPA] = []
+    constructed: ClassVar[list[_FakeGEPA]] = []
 
     def __init__(
         self,

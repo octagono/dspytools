@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 
 @dataclass
@@ -75,9 +76,13 @@ class ResourceBudget:
             "agents_generated": self._agents_generated,
         }
 
-    PRODUCTION = {
+    PRODUCTION: ClassVar[dict] = {
         "max_llm_calls": 200,
         "max_wall_seconds": 600,
         "max_agents_generated": 20,
     }
-    LIGHT = {"max_llm_calls": 50, "max_wall_seconds": 180, "max_agents_generated": 5}
+    LIGHT: ClassVar[dict] = {
+        "max_llm_calls": 50,
+        "max_wall_seconds": 180,
+        "max_agents_generated": 5,
+    }

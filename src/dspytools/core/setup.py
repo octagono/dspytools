@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, get_args
 
 if TYPE_CHECKING:
     import dspy
@@ -101,7 +101,8 @@ def resolve_safe_types(specs: Any) -> list[type]:
     """Resolve ``"module:Class"`` / ``"module.Class"`` spellings into classes.
 
     Used for ``dspy.configure_cache(safe_types=...)`` — the only widening knob
-    on restricted cache deserialization.  Raises ``ValueError`` on a bad spec.
+    on restricted cache deserialization.  Raises ``ValueError`` on a bad spec
+    and ``TypeError`` when the spec resolves to a non-class.
     """
     from importlib import import_module
 
@@ -118,7 +119,7 @@ def resolve_safe_types(specs: Any) -> list[type]:
         except (ImportError, AttributeError) as exc:
             raise ValueError(f"cannot resolve safe type {spec!r}: {exc}") from exc
         if not isinstance(obj, type):
-            raise ValueError(f"safe type {spec!r} is not a class")
+            raise TypeError(f"safe type {spec!r} is not a class")
         resolved.append(obj)
     return resolved
 
@@ -180,7 +181,7 @@ class LMRegistry:
     Optimization 26: Teacher LM cached like student LM.
     """
 
-    _instances: dict[str, dspy.LM] = {}
+    _instances: ClassVar[dict[str, dspy.LM]] = {}
     _default: dspy.LM | None = None
     _teacher: dspy.LM | None = None  # Optimization 26: cached teacher
 
@@ -560,7 +561,7 @@ def setup_dspy(
                                 parsed[_k] = parse_value(
                                     _v, signature.output_fields[_k].annotation
                                 )
-                            except Exception:
+                            except Exception:  # noqa: BLE001 — per-field parse tolerance
                                 parsed[_k] = _v
             if not isinstance(parsed, dict):
                 raise AdapterParseError(

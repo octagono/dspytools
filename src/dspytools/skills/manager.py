@@ -40,7 +40,7 @@ def _count_demos(program: Any) -> int:
     """Number of labeled examples stored on a compiled program's predictors."""
     try:
         predictors = list(program.named_predictors())
-    except Exception:  # not a dspy.Module (e.g. a bare Predict)
+    except Exception:  # noqa: BLE001 — not a dspy.Module (e.g. a bare Predict)
         demos = getattr(program, "demos", None)
         return len(demos or [])
     return sum(
@@ -245,7 +245,7 @@ signature: {_yaml_scalar(signature)}
                 skill_name=name,
                 program_path=str(skill_path / "program.json"),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort graph write
             _log.warning("skill_graph_record_failed", skill=name, error=str(exc))
 
         return {

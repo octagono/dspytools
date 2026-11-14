@@ -37,6 +37,7 @@ and capped at ``max_delay``.
 from __future__ import annotations
 
 import functools
+import math
 import time
 from collections.abc import Callable
 from typing import Any
@@ -149,7 +150,7 @@ def retry_after_seconds(exc: BaseException) -> float | None:
     if not isinstance(value, (int, float)):
         return None
     seconds = float(value)
-    if seconds != seconds or seconds in (float("inf"), float("-inf")):
+    if math.isnan(seconds) or seconds in (float("inf"), float("-inf")):
         return None  # NaN / inf
     return seconds if seconds >= 0 else None
 

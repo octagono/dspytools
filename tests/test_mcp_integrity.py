@@ -821,7 +821,11 @@ def test_no_spec_declares_an_output_schema():
 def test_importing_the_server_does_not_import_mlflow():
     code = "import sys; import dspytools.mcp.server; print('mlflow' in sys.modules)"
     result = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, timeout=180
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=180,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "False"

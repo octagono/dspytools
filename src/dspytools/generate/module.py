@@ -196,6 +196,7 @@ class SandboxPool:
         try:
             result = subprocess.run(
                 [self.command, "-c", code],
+                check=False,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
