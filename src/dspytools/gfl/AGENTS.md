@@ -107,7 +107,7 @@ All persistent state lives under `~/.config/dspytools/`:
 - `GFLPipeline.compile_draft(student, trainset, optimizer_name, draft_rounds, polish_rounds)` → `{optimizer, draft_score, polished_score, improvement, draft_rounds, polish_rounds, best_program, teacher_used}`
 - Phase 1: `draft_rounds` (default 3) optimization passes with student LM (`LMRegistry.get_or_default()`)
 - Phase 2: `polish_rounds` (default 1) optimization passes with teacher LM (`LMRegistry.get_teacher()`)
-- Uses `dspy.context(lm=..., temperature=...)` to switch LM for each phase
+- Switches LM per phase with `dspy.context(lm=sampling_lm(lm, t))` from `core.setup` — `temperature` is not a DSPy setting, so `dspy.context(temperature=...)` is silently ignored
 - Returns `round_scores` array with per-round scores for granular tracking
 - Reduces teacher LM API costs by 3-5x for iterative optimizers like GEPA
 - Falls back to draft result gracefully if no teacher LM configured

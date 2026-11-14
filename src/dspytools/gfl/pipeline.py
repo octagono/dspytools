@@ -27,7 +27,7 @@ from dspytools.core.logging_config import get_logger
 from dspytools.core.metrics import exact_match_metric, gepa_metric, gepa_metric_float
 from dspytools.core.mlflow_tracker import get_tracker
 from dspytools.core.retry import retry
-from dspytools.core.setup import LMRegistry
+from dspytools.core.setup import LMRegistry, sampling_lm
 from dspytools.evolve.self_evolve import SelfEvolveEngine
 from dspytools.gfl.budget import ResourceBudget
 from dspytools.gfl.consolidation import SkillConsolidator
@@ -390,7 +390,7 @@ class GFLPipeline:
         for round_num in range(draft_rounds):
             try:
                 self.budget.check()
-                with dspy.context(lm=student_lm, temperature=0.7):
+                with dspy.context(lm=sampling_lm(student_lm, 0.7)):
                     draft_program = self._dispatch_optimizer(
                         optimizer_name, draft_program, trainset
                     )
@@ -423,7 +423,7 @@ class GFLPipeline:
             for round_num in range(polish_rounds):
                 try:
                     self.budget.check()
-                    with dspy.context(lm=teacher_lm, temperature=0.3):
+                    with dspy.context(lm=sampling_lm(teacher_lm, 0.3)):
                         polished_program = self._dispatch_optimizer(
                             optimizer_name, polished_program, trainset
                         )

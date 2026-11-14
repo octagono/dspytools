@@ -10,7 +10,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Ruff](https://img.shields.io/badge/ruff-zero--errors-brightgreen)
 ![Pyright](https://img.shields.io/badge/pyright-zero--errors-brightgreen)
-![Tests](https://img.shields.io/badge/tests-487-pass-brightgreen)
+![Tests](https://img.shields.io/badge/tests-490-pass-brightgreen)
 
 A production-grade, self-evolving CLI for DSPy program management — featuring hot-swap inference,
 MCP agent interoperability, a Generative Feedback Loop (GFL) pipeline, skills system,
@@ -808,7 +808,7 @@ dspytools/
 │  ├── api/ (1)        ← FastAPI hot-swap server
 │  ├── config/ (2)       ← Config: settings (hot-reload, env var overrides), env
 │  └── cli/ (3)        ← Rich output utilities (llm_help, output, rich_config)
-├── tests/ (31 files)      ← 487 hermetic tests (DummyLM only, zero live-LLM dependency)
+├── tests/ (31 files)      ← 490 hermetic tests (DummyLM only, zero live-LLM dependency)
 ├── docker-compose.redis.yml  ← Redis Stack + FalkorDB container
 ├── AGENTS.md          ← DOX framework root
 ├── pyproject.toml       ← UV project + pyright + pytest config

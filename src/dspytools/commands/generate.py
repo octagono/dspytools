@@ -16,7 +16,7 @@ from dspytools.core._dspy import dspy
 from dspytools.core.logging_config import get_logger
 from dspytools.core.output import create_run_dir, save_program
 from dspytools.core.registry import register_run
-from dspytools.core.setup import LMRegistry, setup_dspy
+from dspytools.core.setup import LMRegistry, sampling_lm, setup_dspy
 
 _log = get_logger(__name__)
 
@@ -82,7 +82,13 @@ def gen_llms_txt(
 
         adapter = BAMLAdapter(use_native_function_calling=False)
 
-    with dspy.context(adapter=adapter, temperature=0.3):
+    # temperature is not a DSPy setting — it has to ride on the LM itself.
+    overrides: dict[str, object] = {"adapter": adapter}
+    ambient_lm = getattr(dspy.settings, "lm", None)
+    if ambient_lm is not None:
+        overrides["lm"] = sampling_lm(ambient_lm, 0.3)
+
+    with dspy.context(**overrides):
         result = analyzer(
             repo_url=repo_url,
             file_tree=file_tree,

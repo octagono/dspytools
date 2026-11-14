@@ -122,7 +122,8 @@ def test_unset_settings_are_not_injected(monkeypatch, _hermetic):
         monkeypatch, _hermetic, cfg={"dspy": {"adapter": "chat"}}
     )
 
-    assert set(captured) == {"lm", "adapter"}
+    # Only persisted keys plus the track_usage project default are forwarded.
+    assert set(captured) == {"lm", "adapter", "track_usage"}
     # The adapter/model_type/cache keys are consumed here, never forwarded.
     assert "model_type" not in captured
     assert "cache" not in captured
@@ -426,3 +427,45 @@ def test_response_format_retry_not_used_without_response_format(monkeypatch, _he
 
     # No response_format was ever set, so there is no retry.
     assert len(engine.requests) == 1
+
+
+# ---------------------------------------------------------------------------
+# 9. temperature lives on the LM, never in dspy.context/settings
+# ---------------------------------------------------------------------------
+
+
+def test_temperature_is_not_a_dspy_setting():
+    """``dspy.context(temperature=...)`` is inert: nothing reads it."""
+    from dspy.dsp.utils.settings import DEFAULT_CONFIG
+
+    assert "temperature" not in DEFAULT_CONFIG
+
+
+def test_lm_copy_carries_sampling_temperature():
+    """The supported way to vary temperature is ``lm.copy(...)``."""
+    lm = dspy.LM(
+        "openai/gpt-4o", api_base="http://127.0.0.1:9/v1", temperature=0.0, cache=False
+    )
+    warm = lm.copy(temperature=0.3)
+
+    assert warm.kwargs["temperature"] == 0.3
+    assert lm.kwargs["temperature"] == 0.0
+    assert warm.kwargs["api_base"] == lm.kwargs["api_base"]
+
+
+def test_sampling_temperature_rides_on_the_lm_not_the_context():
+    """Guard every call site: temperature goes through ``sampling_lm``."""
+    import inspect
+
+    from dspytools.commands import generate
+    from dspytools.core.setup import sampling_lm
+    from dspytools.gfl import pipeline
+
+    stub = object()
+    assert sampling_lm(stub, 0.3) is stub  # non-LM stand-ins pass through
+
+    for module in (pipeline, generate):
+        source = inspect.getsource(module)
+        flat = " ".join(source.split())
+        assert "dspy.context(temperature=" not in flat
+        assert "sampling_lm(" in source

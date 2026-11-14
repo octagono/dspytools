@@ -77,7 +77,7 @@ _stage1_lint() {
 		fail_count=$((fail_count + 1))
 	fi
 
-	echo -n "  pytest (487 tests) ... "
+	echo -n "  pytest (490 tests) ... "
 	if $PYTHON -m pytest tests/ -q >>"$log" 2>&1; then
 		ok "pass"
 		pass=$((pass + 1))

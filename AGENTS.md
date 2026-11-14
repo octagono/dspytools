@@ -72,6 +72,7 @@ When the user requests a durable behavior change, record it here or in the relev
 - **Metrics**: `core.metrics.exact_match_metric` normalizes both answers (strip/casefold/whitespace/surrounding punctuation) before comparing; `gepa_metric` returns `dspy.Prediction(score, feedback)` (use `gepa_metric_float` where the metric is summed, e.g. `dspy.BetterTogether`).
 - **GRPO** (`dspy.teleprompt.grpo.GRPO`, not re-exported by `dspy`) is finetune-only and has no `lora`/`beta`/`max_steps` kwargs in 3.5 — `compile grpo` maps `--max-steps` to `num_train_steps` and fails fast on a local llama.cpp endpoint.
 - **GEPA/Flex/RLM are graduated** (no `dspy.experimental`). GEPA kwargs are validated against the installed constructor — accept, never hardcode a version list.
+- **Sampling**: `temperature` is not a DSPy setting (`DEFAULT_CONFIG` omits it; `Predict` reads `config`/`lm.kwargs`). Vary it with `core.setup.sampling_lm(lm, t)` → `lm.copy(temperature=t)`; `dspy.context(temperature=...)` is silently ignored.
 - **Caches**: restricted deserialization is the default (canonical v2 keys invalidate old entries); `configure_cache(safe_types=...)` is the only widening knob.
 - **Usage accounting**: `setup_dspy()` turns DSPy's `track_usage` on by default (a persisted `dspy.track_usage` still wins). Read real numbers from `Prediction.get_lm_usage()` / `lm.history[-1]["usage"|"cost"]` via `core.cost_tracker`; cached calls report `None` and are skipped, never counted as free work.
 - **Retries**: `core.retry` retries upstream's own classifier (`dspy.utils.exceptions._RETRYABLE_LM_ERRORS`: rate-limit, timeout, server, transport, lock-timeout) plus stdlib transients, honours `retry_after`, and refuses context-window/auth/bad-request/config errors even if a caller widens the tuple. `LMUnexpectedError` is deliberately not retried — upstream does not classify unclassified failures as retryable.
@@ -136,7 +137,7 @@ Root governs the dspytools project — DSPy 3.5.0 examples running on Qwen3.5-9B
 ## Quick Commands
 
 ```bash
-pytest tests/ -q              # 487 hermetic tests, ~6s (DummyLM only; 20 Redis/FalkorDB failures when no container is up)
+pytest tests/ -q              # 490 hermetic tests, ~6s (DummyLM only; 20 Redis/FalkorDB failures when no container is up)
 ruff check                     # zero errors required
 dspytools --help               # explore all 24 commands
 dspytools self auto-fix         # inspect and fix drift-degraded programs

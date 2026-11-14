@@ -421,9 +421,9 @@ def dspy_show():
     dspy_cfg = cfg.get("dspy", {})
 
     # The effective defaults for keys the user has not set. All but one are
-    # DSPy's own; ``track_usage`` is a project default applied by
-    # ``core.setup._default_track_usage()`` so real token/cost accounting works
-    # out of the box (see ``core.cost_tracker.usage_from_result``).
+    # DSPy's own; ``track_usage`` is a project default forwarded by
+    # ``core.setup.setup_dspy()`` so real token/cost accounting works out of the
+    # box (see ``core.cost_tracker.usage_from_result``).
     defaults = {
         "track_usage": True,
         "async_max_workers": 8,

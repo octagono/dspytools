@@ -297,14 +297,11 @@ def _run_setup_dspy(monkeypatch, cfg: dict):
 
 
 def test_setup_dspy_enables_usage_tracking_by_default(monkeypatch, _restore_settings):
-    from dspy.dsp.utils.settings import main_thread_config
-
-    main_thread_config.pop("track_usage", None)
     captured = _run_setup_dspy(monkeypatch, {"dspy": {}})
 
-    assert main_thread_config["track_usage"] is True
-    # ... without injecting an extra configure kwarg (contract from test_lm_settings).
-    assert set(captured) == {"lm", "adapter"}
+    # Forwarded as a real configure() kwarg rather than written into DSPy's
+    # private settings dict, so the public API path is the only one used.
+    assert captured["track_usage"] is True
 
 
 def test_config_can_still_disable_usage_tracking(monkeypatch, _restore_settings):

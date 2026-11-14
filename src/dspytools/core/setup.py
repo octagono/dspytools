@@ -83,6 +83,20 @@ _RUNTIME_SETTING_KEYS = (
 )
 
 
+def sampling_lm(lm: Any, temperature: float) -> Any:
+    """Return ``lm`` carrying this call's sampling ``temperature``.
+
+    ``temperature`` is not a DSPy setting: it is absent from
+    ``DEFAULT_CONFIG`` and ``Predict`` reads it from ``config`` or
+    ``lm.kwargs``, so ``dspy.context(temperature=...)`` silently does nothing.
+    ``lm.copy(...)`` shares the underlying HTTP pool but isolates
+    kwargs/history/callbacks, which is what actually applies the override.
+    Objects without ``copy`` (test stand-ins) are returned untouched.
+    """
+    copy_lm = getattr(lm, "copy", None)
+    return copy_lm(temperature=temperature) if callable(copy_lm) else lm
+
+
 def resolve_safe_types(specs: Any) -> list[type]:
     """Resolve ``"module:Class"`` / ``"module.Class"`` spellings into classes.
 
@@ -138,37 +152,12 @@ def _runtime_settings(cfg: dict) -> dict[str, Any]:
     Only keys actually present are returned: an unset key must not be injected,
     so DSPy's own default for it stays in force.
 
-    ``track_usage`` is the one setting with a project default (``True`` — see
-    :func:`_default_track_usage`).  It is applied through the settings object
-    instead of being injected here, so the "never forward an unset key"
-    contract for ``dspy.configure`` kwargs stays exact.
+    ``track_usage`` is the one setting with a project default (``True``), added
+    by :func:`setup_dspy` rather than here so this function stays "persisted
+    keys only".
     """
     section = cfg.get("dspy", {})
     return {k: section[k] for k in _RUNTIME_SETTING_KEYS if k in section}
-
-
-def _default_track_usage() -> None:
-    """Turn DSPy usage tracking on unless config already set it.
-
-    ``core.cost_tracker`` records *measured* tokens from
-    ``Prediction.get_lm_usage()``, which DSPy only populates when
-    ``settings.track_usage`` is true (verified against dspy 3.5.0: the getter
-    returns ``None`` when tracking is off).  Without this default every cost
-    report would silently fall back to ``PRICING`` estimates.
-
-    Written straight into ``main_thread_config`` — the dict ``configure()``
-    itself writes and every ``dspy.context`` copies.  A direct assignment is
-    used deliberately: it neither injects an extra ``dspy.configure`` kwarg
-    (which would break the "unset keys stay unset" contract) nor trips the
-    configure-owner-thread ``RuntimeError`` when setup runs off the owner
-    thread.  ``dspy.configure(track_usage=...)`` from config always wins
-    because it is forwarded as a normal runtime setting.
-    """
-    import sys as _sys
-
-    _cfg_mod = _sys.modules.get("dspy.dsp.utils.settings")
-    if _cfg_mod is not None:
-        _cfg_mod.main_thread_config["track_usage"] = True
 
 
 def _lm_cache_key(model: str, lm_kw: dict[str, Any]) -> str:
@@ -665,8 +654,9 @@ def setup_dspy(
 
     # Usage tracking defaults ON so Prediction.get_lm_usage() is populated for
     # core.cost_tracker; a persisted "track_usage" wins via runtime_settings.
-    if "track_usage" not in runtime_settings:
-        _default_track_usage()
+    # Forwarded as a real configure() kwarg (public API) rather than written
+    # into DSPy's private settings dict.
+    runtime_settings.setdefault("track_usage", True)
 
     try:
         dspy.configure(lm=lm, adapter=adapter, **runtime_settings)
@@ -684,6 +674,7 @@ def setup_dspy(
         if _cfg_mod is not None:
             _cfg_mod.main_thread_config["lm"] = lm
             _cfg_mod.main_thread_config["adapter"] = adapter
+            _cfg_mod.main_thread_config.update(runtime_settings)
             _cfg_mod.main_thread_config.update(runtime_settings)
 
     # Optimization 2: Lazy-load — create HotSwapManager but defer load_all() to first swap/infer.

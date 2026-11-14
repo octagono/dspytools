@@ -10,7 +10,7 @@
 | `.pre-commit-config.yaml` | Exists — ruff + ruff-format |
 | `pyproject.toml` | setuptools backend, no native binary packaging |
 | `mojo_modules/build.sh` | Exists — compiles `.mojo` → `.so` via `mojo build` |
-| Test suite | 487 hermetic tests across 31 files, ~5s, zero LLM deps |
+| Test suite | 490 hermetic tests across 31 files, ~5s, zero LLM deps |
 | Golden eval datasets | `data/qa_train.json` (15 ex), `data/dev_qa.json`, `data/project_analysis_train.json` |
 
 ## Architecture
@@ -75,7 +75,7 @@ smoke-tests:
     - run: python -c "from dspytools.core._dspy import dspy; from dspytools.gfl.pipeline import GFLPipeline; from dspytools.mcp.tools import BUILTIN_TOOLS; print(f'{len(BUILTIN_TOOLS)} MCP tools')"
 ```
 
-**Rationale:** 487 tests run in ~6s with zero LLM dependencies (conftest isolates all paths). The import check mirrors `verify.sh` and catches dependency breakage early.
+**Rationale:** 490 tests run in ~6s with zero LLM dependencies (conftest isolates all paths). The import check mirrors `verify.sh` and catches dependency breakage early.
 
 ### Files to create
 - `.github/workflows/ci.yml`
@@ -509,7 +509,7 @@ promote-programs:
 Week 1: Foundation
 ├── 1. .github/workflows/ci.yml (Stage 1a + 1b)
 ├── 2. Verify ruff format --check passes (fix formatting drift)
-└── 3. Verify all 487 tests pass on ubuntu-latest
+└── 3. Verify all 490 tests pass on ubuntu-latest
 
 Week 2: Integration
 ├── 4. .github/workflows/integration.yml (Stage 2a + 2c)
