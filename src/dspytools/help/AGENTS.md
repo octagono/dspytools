@@ -42,7 +42,7 @@ This directory owns the full help pipeline: CLI introspection (context gathering
 - Cache path: `~/.config/dspytools/help/compiled.json` (from `config.settings.help_cache_path()`). Metadata path: `~/.config/dspytools/help/meta.json` (from `config.settings.help_meta_path()`). `self optimize`/`self status` write/read these same paths.
 - Two optimization modes:
   - **Quick** (default): `dspy.LabeledFewShot(k=min(4, len(trainset)))` — no LM calls during compile.
-  - **Teacher** (`use_teacher=True`): `dspy.GEPA` with `LMRegistry.get_teacher()` as reflection LM. Uses `max_metric_calls=50, num_threads=1` to bound request fan-out against a single local model. Compatible with any Open AI-compatible LM including local 7B models (~10s compile). For production use, prefer DeepSeek-class remote models.
+  - **Teacher** (`use_teacher=True`): `dspy.GEPA` with `LMRegistry.get_teacher()` as reflection LM. Uses `max_metric_calls=50, num_threads=1` to bound request fan-out against a single local model. Compatible with any Open AI-compatible LM including Qwen3.5-9B (~10s compile). For production use, prefer DeepSeek-class remote models.
 - The teacher-mode metric is `answer_overlap_score(gold.answer, pred.answer)` from `core.metrics`: normalized equality (1.0) or fraction of gold tokens covered, capped at 0.99. It used to return `1.0` for any non-empty answer, so with GEPA's default `skip_perfect_score=True` every example was skipped and reflection proposed nothing.
 - GEPA splits 20% of the trainset as valset (seed 42) to suppress the "no valset" warning.
 - `clear()` removes both cache and meta files.

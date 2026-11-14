@@ -11,7 +11,7 @@ from dspytools.gfl.pipeline import GFLPipeline
 pipeline = GFLPipeline()
 result = pipeline.run(student=my_module, trainset=data)
 ```
-Evaluates all optimizers on 10% of data, then runs survivors on full dataset. Returns best optimizer + scores.
+Evaluates all four optimizers in parallel on the full train split. Returns best optimizer + scores.
 
 ### `run_halving()` — Successive Halving
 Prunes worst 50% each round. Saves up to 75% of compile time vs full 4-way:
@@ -22,7 +22,7 @@ result = pipeline.run_halving(student=my_module, trainset=data)
 Configurable optimizer list via `optimizers` parameter. `--auto-suggest` CLI flag uses `MetaOptimizer` to select the best optimizer list by dataset size/complexity.
 
 ### `compile_draft()` — Speculative Compile
-Quick draft compile using BootstrapFewShot, suitable for rapid iteration:
+Quick draft compile using GEPA (`optimizer_name`, default `gepa`), suitable for rapid iteration:
 ```python
 draft = pipeline.compile_draft(student=my_module, trainset=data[:50])
 # → round_scores array with per-round scores for granular tracking
@@ -37,7 +37,7 @@ result = pipeline.run_single(student=my_module, trainset=data, optimizer="mipro"
 ## Data Management
 
 - **`split_holdout()`**: Splits off 20% holdout set before optimizer ever sees data. In `GFLPipeline.run()`, holdout is split at the START (Invariant 5) and used only for SPRT validation, never by compile.
-- **`gate_promotion()`**: Checks if new program beats previous baseline at 95% confidence before promoting.
+- **`gate_promotion()`**: Fixed-delta CI gate — promotes when the candidate's holdout improvement exceeds `min_improvement` (default 2%). No significance test.
 - **SPRT post-compile validation**: After best optimizer is selected, `run()` calls `SelfEvolveEngine.validate_and_deploy()` (SPRT, p0=0.50, p1=0.65, α=0.05, β=0.20) on the reserved holdout. Returns `{validation: {accepted, score, p_value, n_evaluated, early_stop}}`. Falls back to baseline if rejected.
 
 ## Synthetic Data & Co-Evolution

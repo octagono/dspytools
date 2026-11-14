@@ -48,12 +48,9 @@ dspytools lora train my-adapter --data output/extracted_<run-id>.jsonl --colab
 dspytools lora load my-adapter
 ```
 
-### 5. Test and evaluate
+### 5. Evaluate
 
 ```bash
-# Quick test
-dspytools lora test my-adapter
-
 # Interactive chat
 echo "Write a Python context manager" | dspytools lora chat my-adapter
 
@@ -98,7 +95,6 @@ llama-cpp-server handles LoRA via adapter paths passed to the `/api/generate` en
 | `load <name> [path]` | Load LoRA adapter into llama-cpp-server via `/api/generate` |
 | `unload <name>` | Unload LoRA adapter from llama-cpp-server |
 | `chat <name>` | Chat with LoRA model via llama-cpp-server `/api/chat` |
-| `test <name>` | Quick code generation test |
 | `health` | llama-cpp-server version, running models, VRAM, LoRA models |
 | `discover [dir]` | Find safetensors adapters in directory |
 | `extract <run-id>` | Extract best DSPy outputs as JSONL (uses exact_match metric) |
@@ -171,7 +167,7 @@ graph TD
 ## Configuration
 
 - **llama-cpp-server URL**: `DSPYTOOLS_LLAMA_CPP_URL` env var (default: `http://127.0.0.1:8080`)
-- **Base model**: Read from `config["lm"]["student"]["model"]` (set via `dspytools configure set`)
+- **Base model**: Read from `config["lm"]["student"]["model"]` (set via `dspytools configure lm set --role student`)
 - **Adapter storage**: `~/.config/dspytools/adapters/` (env: `DSPYTOOLS_ADAPTERS_DIR`)
 - **Training output**: `~/.config/dspytools/distill/`
 

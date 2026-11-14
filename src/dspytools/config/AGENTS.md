@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Central configuration and environment management for dspytools. Provides hot-reload config caching (TOML-based, single `~/.config/dspytools/config.toml`), `.env` file read/write, and path resolution for all dspytools data directories (SSOT under `~/.config/dspytools/`).
+Central configuration and environment management for dspytools. Provides hot-reload config caching (TOML, user `~/.config/dspytools/config.toml` merged with an optional project `<project>/.dspytools/config.toml`), `.env` file read/write, and path resolution for all dspytools data directories (SSOT under `~/.config/dspytools/`).
 
 ## Ownership
 
@@ -24,8 +24,8 @@ Owns two source files:
      - `server.api.enabled: false, port: 8080`
      - `lm.student: null, lm.teacher: null`
      - `keys: {}`
-  2. User config: `~/.config/dspytools/config.toml` — **SSOT**, single config file
-  3. ~~Project config~~ — removed. All config lives under user config only.
+  2. User config: `~/.config/dspytools/config.toml` — user-wide SSOT
+  3. Project config: `<project>/.dspytools/config.toml` — merged after user config, so project values win
 - **`_deep_merge(base, update)`** — recursive dict merge. Lists are replaced, not extended. Nested dicts are merged recursively.
 - **`load_config()`** — alias for `ConfigCache.get()`. Use this for reads to get hot-reload behavior.
 - **`save_config(cfg)`** — writes to project config dir, invalidates cache.
@@ -45,7 +45,7 @@ Owns two source files:
   - `distill_dir()` — `~/.config/dspytools/distill/`
   - `dspy_lora_dir()` — `~/.config/dspytools/lora/` (or `DSPY_LORA_DIR` env var)
   - `adapters_dir()` — `~/.config/dspytools/adapters/`
-  - `mlflow_tracking_uri()` — `os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000")`
+  - `mlflow_tracking_uri()` — `os.environ.get("MLFLOW_TRACKING_URI")` when set, else `sqlite:///{config_dir}/mlruns/mlflow.db`
   - `mlflow_experiment_name()` — `os.environ.get("MLFLOW_EXPERIMENT_NAME", "dspytools")`
   - `embedder_kwargs()` — returns `{model, api_base, api_key}` dict for `dspy.Embedder` (SSOT). DSPy 3.5's Embedder goes through the OpenAI SDK for hosted endpoints: only `openai/` and `azure/` prefixes are accepted (`llama_cpp/x` is rewritten to `openai/x`), and `api_base` reaches the SDK as `base_url`.
   - `embedder_dimension()` — reads `DSPYTOOLS_EMBEDDING_DIM` env var, returns int (default 768 for embeddinggemma)
@@ -78,7 +78,7 @@ Owns two source files:
 
 ### Shared contracts
 
-- **Config loading order**: environment variables → `ConfigCache` (user) → defaults. Environment variables take highest priority. Project config (`<project>/.dspytools/config.toml`) is no longer merged — SSOT is the user config.
+- **Config loading order**: environment variables → `ConfigCache` (user) → project (`<project>/.dspytools/config.toml`, merged last) → defaults. Environment variables take highest priority; project config overrides user config. `save_config()` writes the project file, `save_user_config()` the user file.
 - **API key resolution**: `LMRegistry` in `core/setup.py` calls `env.get_key(provider)` when constructing `dspy.LM` instances. Keys can live in `.env` or `os.environ`.
 - **Path determinism**: All path helpers use `mkdir(parents=True, exist_ok=True)` — they always succeed and return a valid path. No file existence checks needed at call sites.
 

@@ -28,9 +28,9 @@ Files are independent — no circular imports. `__init__.py` aggregates; all oth
   3. `ChainOfThought` → usage_examples from file_tree (replaces deprecated `CodeAct`, removed in this codebase)
   4. `ChainOfThought` → structured_summary from concept bullets (replaces deprecated `ProgramOfThought`)
   5. `GenerateLLMsTxt` (ChainOfThought) → final llms_txt_content
-- **AST caching**: `RepositoryAnalyzer.forward()` computes a composite SHA-256 key from all inputs and checks `AnalysisCache` before running the pipeline. On cache hit, returns a `dspy.Prediction` directly. After pipeline completion, the result is cached for future runs. Cache directory: `~/.cache/dspytools/analysis/`. Cache is keyed by 24-char SHA-256 digest of `repo_url|file_tree|readme_content|package_files`.
+- **AST caching**: `RepositoryAnalyzer.forward()` computes a composite SHA-256 key from all inputs and checks `AnalysisCache` before running the pipeline. On cache hit, returns a `dspy.Prediction` directly. After pipeline completion, the result is cached for future runs. Cache directory: `~/.config/dspytools/cache/` (`config.settings.cache_dir()`, env `DSPYTOOLS_CACHE_DIR`). Cache is keyed by 24-char SHA-256 digest of `repo_url|file_tree|readme_content|package_files`.
 - `AnalysisCache.warmup(paths)` — pre-computes real composite cache keys for LOCAL repository paths by scanning file_tree/readme/packages. Used by `generate warmup` CLI to reduce cold-start latency for batch processing of local repos.
-- **DSPy 3.5 removal**: `CodeAct` and `ProgramOfThought` were removed upstream in 3.5 (no compatibility alias) and always fell back to ChainOfThought on the local 3B model (which cannot execute sandboxed code). Stages 3+4 are plain `ChainOfThought` predictors — no sandbox, no fallback scaffolding. See `RepositoryAnalyzer.__init__`.
+- **DSPy 3.5 removal**: `CodeAct` and `ProgramOfThought` were removed upstream in 3.5 (no compatibility alias) and always fell back to ChainOfThought on the local Qwen3.5-9B model (which cannot execute sandboxed code). Stages 3+4 are plain `ChainOfThought` predictors — no sandbox, no fallback scaffolding. See `RepositoryAnalyzer.__init__`.
 
 ### Signatures (`module.py`)
 
@@ -42,10 +42,10 @@ Files are independent — no circular imports. `__init__.py` aggregates; all oth
 
 - `llms_txt_quality(content: str) → float` — imported from `dspytools.core.metrics`. Returns 0.0–1.0 based on:
   - JSON echo detection → instant 0.0
-  - Markdown heading presence (# → +0.15, ≥1 h1 → +0.1, ≥2 h2 → +0.15)
+  - Markdown heading presence (`#` prefix → +0.15, any `\n## ` → +0.15)
   - Bullet lists (+0.1), bold emphasis (+0.05), code blocks (+0.1)
-  - Length sweet spot 300–5000 chars (+0.25); >10000 chars penalized (−0.15)
-  - Code block wrapping entire output penalized (−0.2)
+  - Length sweet spot 300–5000 chars (+0.20); >10000 chars penalized (−0.10)
+  - Code block wrapping entire output penalized (−0.15)
   - Score clamped to [0.0, 1.0]
 - `llms_txt_metric(example, prediction, trace) → float` wraps `llms_txt_quality(prediction.llms_txt_content)`. Imported from `dspytools.core.metrics`.
 

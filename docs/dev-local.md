@@ -5,50 +5,41 @@
 | # | Service | Port | Purpose |
 |---|---------|------|---------|
 | 1 | FalkorDB | 6379 | Graph database (skills, memory, lineage) + Redis cache |
-| 2 | LLM Server | 8080 | LM inference endpoint (llama-cpp-server, configurable) |
-| 3 | Embedding | 8001 | embedding server (`DSPYTOOLS_EMBEDDING_URL`, configurable) |
-| 4 | MLflow | 5000 | Experiment tracking (file store at `$PROJECT_ROOT/.mlflow`) |
-| 5 | FastAPI | 8080 | Hot-swap inference server |
-| 6 | MCP SSE | 8002 | MCP server for agent connections |
+| 2 | LLM Server | 8080 | LM inference endpoint (llama-cpp-server, external — checked, not started) |
+| 3 | FastAPI | 8080 | Hot-swap inference server |
+| 4 | MCP SSE | 8002 | MCP server for agent connections |
+
+`scripts/dev-local.sh` manages FalkorDB (Docker) plus the MCP and API servers (in a `dspytools-dev` tmux session). It does not start the llama-cpp-server, an embedding server, or MLflow — those are external.
 
 ## Quick Start
 
 ```bash
-scripts/dev-local.sh up         # Start all services
+scripts/dev-local.sh up         # Start FalkorDB + MCP + API servers
 scripts/dev-local.sh status     # Check health of all services
 scripts/dev-local.sh down       # Stop all services
-scripts/dev-local.sh logs <svc> # Tail logs: redis|llm|emb|mlflow|api|mcp
+scripts/dev-local.sh logs mcp   # Attach to a tmux window: mcp|api
+scripts/dev-local.sh test       # Run scripts/verify.sh
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `up` | Start all services (FalkorDB, LLM, embedding, MLflow, API, MCP) |
-| `down` | Stop all services |
-| `status` | Health check all running services |
-| `logs <svc>` | Tail logs for a specific service |
-| `restart <svc>` | Restart a specific service |
-| `redis-start\|stop` | FalkorDB container only |
-| `mlflow-start\|stop` | MLflow tracking server only |
-| `api-start\|stop` | FastAPI hot-swap server only |
-| `mcp-start\|stop` | MCP SSE server only |
+| `up` | Start FalkorDB (Docker), then MCP + API servers in tmux |
+| `down` | Stop the tmux session and the FalkorDB container |
+| `status` | Health check llama-cpp-server, FalkorDB, MCP, API |
+| `logs [win]` | Attach to a tmux window (`mcp` or `api`); with no window, print the last lines of each |
+| `restart` | Down then up (all services) |
+| `test` | Run `scripts/verify.sh` |
 
 ## Service Details
 
 ### FalkorDB (Redis Stack)
-Podman container running `falkordb/falkordb:latest` on port 6379.
+Docker container (`rtk docker`) running `docker.io/falkordb/falkordb:latest` on port 6379.
 Provides graph queries (Cypher), vector search, and response caching.
 
 ### LLM Server
-The LLM server runs on llama-cpp-server (default on port 8080). Configure the endpoint via `DSPYTOOLS_LLAMA_CPP_URL` environment variable.
-
-### Embedding Server
-Runs on port 8001 by default. Configure via `DSPYTOOLS_EMBEDDING_URL` and `DSPYTOOLS_EMBEDDING_MODEL`.
-Default model: `embeddinggemma` (768-dim); dimension overridable via `DSPYTOOLS_EMBEDDING_DIM`.
-
-### MLflow
-File-based tracking at `$PROJECT_ROOT/.mlflow`. Web UI on port 5000.
+The LLM server runs on llama-cpp-server (default on port 8080) and is **not** managed by this script — `up`/`status` only probe it. Configure the endpoint via `DSPYTOOLS_LLAMA_CPP_URL` environment variable.
 
 ### FastAPI
 Hot-swap inference server. Loads compiled programs and serves them over HTTP.

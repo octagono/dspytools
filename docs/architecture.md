@@ -6,16 +6,16 @@
 dspytools/
 ├── main.py                  CLI entry point (SelfOptimizingCLI)
 ├── commands/ (24 files)     Click subcommand groups
-│   ├── compile.py           20+ optimizer commands + OptimizerRegistry factory
+│   ├── compile.py           20+ optimizer commands + `_OPTIMIZER_SPECS` registry factory
 │   ├── generate.py          llms.txt generation (llms-txt, batch, explore)
 │   ├── graph.py             FalkorDB graph management (status, query, migrate)
 │   ├── skills.py            Skills system
-│   ├── pipeline.py          Multi-step pipeline compose (compose, run, list, show)
-│   ├── export.py            Program export (JSON, ONNX, Python)
+│   ├── pipeline.py          Multi-step pipeline compose (compose, run, list)
+│   ├── export.py            Program packaging (zip, tar, dir)
 │   ├── compare.py           Side-by-side program comparison + lineage
 │   ├── distill.py           LoRA distillation pipeline (run, list-frameworks, stats, prepare-colab)
 │   ├── doctor.py            System diagnostics (env, GPU, deps, config)
-│   ├── lora.py              LoRA adapter management (load, unload, list, chat, test, health, discover)
+│   ├── lora.py              LoRA adapter management (load, unload, list, chat, health, discover)
 │   └── ...
 ├── core/ (21 files)         Engine
 │   ├── _dspy.py             Lazy DSPy import
@@ -35,7 +35,7 @@ dspytools/
 │   ├── errors.py            Typed exception hierarchy
 │   ├── mojo_bridge.py       Shared Mojo module loader (try_load_mojo)
 │   └── logging_config.py    Centralized structlog structured logging
-├── gfl/ (15 files)          Generative Feedback Loop
+├── gfl/ (12 files)          Generative Feedback Loop
 │   ├── pipeline.py          GFLPipeline (compare, single, halving, draft)
 │   ├── paper_optimizers.py  SPIN, MetaPrompt, GEPA, LSE, GRAO, PurifiedOPSD
 │   ├── consolidation.py     Trace2Skill: 3-stage pipeline (Rollout → Analyze → Consolidate)
@@ -54,7 +54,7 @@ dspytools/
 │   ├── router.py            RouterAgent (ReAct + 6 tools)
 │   ├── metrics.py           Evolution metrics tracking
 │   └── layers/              H1 Action, H2 Contract, H3 Trajectory
-├── graph/ (5 files)         FalkorDB graph database integration
+├── graph/ (8 files)         FalkorDB graph database integration
 │   ├── client.py            GraphClient singleton (FalkorDB + Redis)
 │   ├── skill_graph.py       FalkorDBSkillGraph (dependencies, lineage)
 │   ├── cache.py             RedisVL semantic cache
@@ -63,11 +63,11 @@ dspytools/
 ├── memory/ (2 files)        FalkorDB-native persistent memory
 │   ├── manager.py           MemoryManager singleton (entity extraction, dedup)
 │   └── __init__.py
-├── mcp/ (4 files)           MCP server + tools
-│   ├── server.py            Unified server (65 tools, 8+ resources, 3 prompts)
+├── mcp/ (3 files)           MCP server + tools
+│   ├── server.py            Unified server (65 tools, 9 resources, 3 prompts)
 │   ├── tools.py             Tool handlers with response caching
 │   ├── loader.py            MCPSessionPool
-├── skills/ (4 files)        Agent Skills system
+├── skills/ (5 files)        Agent Skills system
 │   ├── manager.py           Skill lifecycle (create → compile → optimize)
 │   ├── loader.py            BM25 + embedding hybrid search
 │   ├── discovery.py         External skills ecosystem search (skills.sh)
@@ -75,7 +75,7 @@ dspytools/
 ├── help/ (4 files)          Self-optimizing --help
 ├── api/ (1 file)            FastAPI hot-swap server
 ├── config/ (2 files)        Config management + .env
-└── cli/ (1 file)            Rich output utilities
+└── cli/ (3 files)            Rich output utilities
 ```
 
 ## Data Flow
@@ -90,7 +90,7 @@ graph TD
     setup --> generate_path[generate path]
     setup --> infer_path[infer path]
 
-    compile_path --> opt_reg[OptimizerRegistry]
+    compile_path --> opt_reg[optimizer commands<br/>_OPTIMIZER_SPECS]
     opt_reg --> gfl[GFLPipeline.run]
     gfl --> mlflow[MLflowTracker.log]
 
@@ -145,9 +145,8 @@ Access via `dspytools compile cost <run-id>` or the `compile_cost` MCP tool.
 
 `core/drift_monitor.py` stores quality snapshots for compiled programs and alerts when scores degrade below baseline. Features:
 - Per-program quality baseline at compile time
-- Configurable drift threshold (default: 10% drop)
+- Configurable drift thresholds (default: warning at 5% drop, critical at 15%)
 - History storage (last N snapshots per program)
-- Warning at 5% degradation, critical at 15%
 - Critical alerts trigger `request_recompile()` for automatic recompilation queue
 - CLI: `dspytools self auto-fix --no-dry-run --auto-fix` processes pending recompiles
 - MCP tools: `drift_status`, `drift_history`, `drift_auto_fix`
@@ -180,7 +179,7 @@ Access via `dspytools compile cost <run-id>` or the `compile_cost` MCP tool.
 - Values are serialized analysis results (file tree, readme, packages)
 - Two-tier: in-memory (fast) + disk (persistent across sessions)
 - TTL-based expiration with manual invalidation
-- MCP tools: `cache_stats`, `cache_invalidate`
+- MCP tools: `analysis_cache_stats`, `analysis_cache_invalidate`
 
 ## Graph Database (FalkorDB)
 
@@ -237,7 +236,7 @@ Access via `dspytools compile cost <run-id>` or the `compile_cost` MCP tool.
 ### Key Design
 
 - **Cosine similarity matching**: Finds semantically similar prompts
-- **Configurable threshold**: Tune precision vs recall (default: 0.1)
+- **Configurable threshold**: Tune precision vs recall (distance threshold, default: 0.15)
 - **TTL expiration**: Auto-invalidate stale entries (default: 1 hour)
 - **Cache statistics**: Track hit rate and memory usage
 

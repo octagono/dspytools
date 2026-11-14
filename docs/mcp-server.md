@@ -27,7 +27,7 @@ dspytools mcp serve --transport sse --port 8002
 | **Diagnostics** | `doctor` |
 | **Sandbox** | `sandbox_execute`, `sandbox_stats` |
 | **Validation** | `validate_deploy`, `archive_search` |
-| **Cache** | `cache_stats`, `cache_invalidate` |
+| **Analysis Cache** | `analysis_cache_stats`, `analysis_cache_invalidate` |
 | **Agent** | `agent_run` |
 | **Self** | `self_status`, `inspect_history` |
 | **MLflow** | `mlflow_status` |
@@ -71,6 +71,6 @@ Read-only tool responses are cached in-memory with a 5-second TTL (`tools.py` `_
 
 ## Resources
 
-- Server: `src/dspytools/mcp/server.py` (64 built-in tools)
+- Server: `src/dspytools/mcp/server.py` (65 built-in tools)
 - Tools: `src/dspytools/mcp/tools.py`
 - Session pool: `src/dspytools/mcp/loader.py`

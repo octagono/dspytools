@@ -16,10 +16,10 @@ engine = SelfEvolveEngine()
 Uses Sequential Probability Ratio Test (SPRT) to determine if a compiled program beats the baseline with minimal evaluations:
 ```python
 result = engine.validate_and_deploy(
-    baseline_program, new_program_id, holdout_set,
+    candidate_program, program_id, holdout_set,
     alpha=0.05, beta=0.2
 )
-# → {"deployed": True, "p_value": 0.003, "evidence_ratio": 12.4}
+# → {"accepted": True, "p_value": 0.003, "n_evaluated": 12, ...}
 ```
 Early stopping on clear wins/losses saves API tokens.
 

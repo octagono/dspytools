@@ -4,14 +4,14 @@
 
 | Asset | Status |
 |-------|--------|
-| GitHub Actions (`.github/workflows/`) | **None** — zero CI today |
+| GitHub Actions (`.github/workflows/`) | 5 workflows — `ci` (lint + smoke), `integration`, `release`, `evaluation`, `deploy` |
 | `scripts/verify.sh` | Exists — ruff + pytest + import checks (manual) |
 | `docker-compose.redis.yml` | Exists — FalkorDB + Redis single container |
 | `.pre-commit-config.yaml` | Exists — ruff + ruff-format |
-| `pyproject.toml` | setuptools backend, no native binary packaging |
+| `pyproject.toml` | hatchling backend, no native binary packaging |
 | `mojo_modules/build.sh` | Exists — compiles `.mojo` → `.so` via `mojo build` |
 | Test suite | 577 hermetic tests across 33 files, ~85s, zero LLM deps |
-| Golden eval datasets | `data/qa_train.json` (15 ex), `data/dev_qa.json`, `data/project_analysis_train.json` |
+| Golden eval datasets | Generated, not committed: `data/golden_eval.jsonl` (50 ex) + `data/golden_baseline.json`; `data/` is gitignored and currently holds only `skink_seeds.json` |
 
 ## Architecture
 
@@ -275,7 +275,7 @@ publish-pypi:
 
 ### pyproject.toml changes
 
-Switch from `setuptools` to `hatchling` for native binary inclusion:
+`pyproject.toml` already uses `hatchling` (migrated from `setuptools`) for native binary inclusion:
 
 ```toml
 [build-system]

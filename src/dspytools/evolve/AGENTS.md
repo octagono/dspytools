@@ -47,7 +47,7 @@ This doc owns all files in `src/dspytools/evolve/` including the `layers/` subdi
 
 ### `router.py` — RouterAgent
 
-- `RouterAgent(max_iters=10)` — wraps `dspy.ReAct("question -> answer", ...)` with 6 tools (text-based parsing for Qwen 7B compatibility).
+- `RouterAgent(max_iters=10)` — wraps `dspy.ReAct("question -> answer", ...)` with 6 tools (text-based parsing for Qwen3.5-9B compatibility).
 - **6 built-in tools** (all `dspy.Tool` instances):
   - `list_programs()` → JSON list of loaded compiled programs
   - `swap_program(program_id)` → JSON `{status, active, previous}` or `{error}`
@@ -106,7 +106,6 @@ Four learning components wired together by `SelfEvolveEngine`:
 - **Trace2Skill consolidation** (`consolidate_skills`): integrated into the engine. Wires the full 3-stage pipeline (Rollout → Analyze → Consolidate) with compilable DSPy modules. Results feed into the skill graph for transitive improvement chains.
 - **Closed self-evolve cycle** (`auto_evolve_cycle`): runs the full loop — suggest optimizer → LSE-evolve context → compile → Trace2Skill consolidate → LoRA distill. The system continuously improves its own programs, contexts, and skill library.
 - **Drift→recompile cascade**: `on_compile()` triggers `DriftMonitor.request_recompile()` for each downstream skill via `SkillGraph.transitive_dependents()`. CLI: `dspytools self auto-fix --no-dry-run --auto-fix`. MCP tool: `drift_auto_fix`.
-- `suggest_optimizer(task_profile) → str` — preference order: morphology best pattern > transfer best > UCB select.
 - `on_skill_improvement(skill) → list[str]` — delegates to `SkillGraph.on_improvement`.
 - `add_skill_dependency(skill, depends_on)` — delegates to `SkillGraph.add_dependency`.
 - `validate_and_deploy(candidate_program, program_id, holdout_set[, alpha=0.05, beta=0.2, max_evaluations=50]) → dict` — Gödel Agent pattern (arXiv 2410.04444) using Sequential Probability Ratio Test (Wald, 1945). Evaluates one example at a time, computes log-likelihood ratio between H₀ (p ≤ 0.50) and H₁ (p ≥ 0.65), accepts/rejects early when confidence thresholds are met. `alpha` controls Type I error (false deploy), `beta` controls Type II error (miss improvement), `max_evaluations` limits total cost. Returns `{accepted, candidate_score, p_value, n_evaluated, early_stop, reason, statistical_method}`.
@@ -139,7 +138,7 @@ Load methods are **fail-fast** — corrupted state files raise immediately inste
 ### `layers/action.py` — H1 Action Layer
 
 - `Action` is a dataclass with fields: `name`, `description`, `program`, `tools`, `input_schema`, `output_schema`, `tags`.
-- `Action.invoke(**inputs) → dict` — executes `self.program(**inputs)`, returns structured output. Uses `_output_field_names` if available (DSPy Prediction), falls back to `toDict()`, then `{"output": str(result)}`.
+- `Action.invoke(**inputs) → dict` — executes `self.program(**inputs)`, returns structured output via `core.loaders.prediction_to_dict()`.
 - `Action.bind(program) → Action` — binds a DSPy program, returns self for chaining.
 - `Action.with_tools(*tools) → Action` — appends tools, returns self for chaining.
 - `Action.to_dict() → dict` — serializes metadata (no program/tools content).
@@ -178,7 +177,7 @@ Load methods are **fail-fast** — corrupted state files raise immediately inste
 - `auto_metric` is intentionally heuristic and rule-based. Do not add learned scoring here — that belongs in the GFL pipeline.
 - Quality thresholds: `score < 0.4` in `ask()` triggers `needs_optimization` flag; `avg_score < 0.5` in `evolve()` triggers `should_recompile`. These are separate thresholds for different purposes.
 - `_quality_history` is in-memory only — lost on process restart. For persistence, route through `core/registry.py` or the GFL `GFLLoop` monitor (which records scores into the engine's convergence tracker).
-- When adding new persistent state in `self_evolve.py`, follow the pattern: `DATA_PATH` class attribute, `_load()`/`save()` methods, silent error handling on load.
+- When adding new persistent state in `self_evolve.py`, follow the pattern: `DATA_PATH` class attribute, `_load()`/`save()` methods built on `core._io.read_json()`/`write_json()` — loads are fail-fast, so corrupt state raises instead of resetting silently.
 - UCB exploration constant `c=2.0` encourages exploration. Decrease for more exploitation-heavy behavior. Tune based on empirical results.
 - Morphology tracker requires `count >= 3` min evidence before recommending a pattern from `best_pattern()`.
 

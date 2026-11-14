@@ -11,6 +11,7 @@ FalkorDB + Redis graph database integration for dspytools. Provides O(1) graph t
 - `SemanticCache` — embedding-based semantic cache for LLM responses (FalkorDB native vector index)
 - `RedisCache` — general-purpose Redis cache with namespace isolation and TTL
 - `cache_mojo_bridge.py` — Mojo SIMD bridge for vector blob serialization (Phase 1). `HAS_MOJO` flag + NumPy fallback. Standalone benchmark target — no longer consumed by `SemanticCache` (FalkorDB native vector search replaced blob storage).
+- `migrate.py` — JSON → FalkorDB migration (`migrate_all()`, `migrate_skill_graph()`, `migrate_morphology()`, `migrate_program_registry()`)
 - `benchmark.py` — Correctness fuzz + throughput benchmark for Phase 1 vector serialization. `python -m dspytools.graph.benchmark --all`.
 
 ## Local Contracts
@@ -63,7 +64,7 @@ FalkorDB + Redis graph database integration for dspytools. Provides O(1) graph t
 - `clear()` — clears Tier 1 via Redis SCAN + Tier 2 via `MATCH (c:CacheVec) DETACH DELETE c`
 - `stats()` — returns cache statistics (exact_entries, semantic_entries, total_entries, hit_count, miss_count, hit_rate_pct)
 - `__init__()` accepts `model_name` param — loads per-model distance threshold from config via `cache_threshold_path()`, falling back to `"default"` key. Creates vector index via `ensure_vector_index()`.
-- `adjust_threshold(drift_delta: float) → None` — dynamically tightens/loosens the similarity threshold based on quality drift. When `drift_delta > 0.05` (quality dropping), tightens by 10% per call (min 0.01). When `drift_delta < 0` (stable/improving), loosens by 10% per call (max 0.30). Wired into `HotSwapManager.infer()` — triggers on critical drift alerts.
+- `adjust_threshold(drift_delta: float) → float` — dynamically tightens/loosens the similarity threshold based on quality drift. When `drift_delta > 0.05` (quality dropping), tightens by 10% per call; when `drift_delta < -0.02` (stable/improving), loosens by 10% per call. Clamped to `[0.01, 0.5]`. Returns the new threshold. Wired into `HotSwapManager.infer()` — triggers on critical drift alerts.
 - Uses shared embedder singleton via `dspytools.core._embedder.get_embedder()`
 - No RediSearch/FT.SEARCH dependency — FalkorDB container lacks RediSearch module
 

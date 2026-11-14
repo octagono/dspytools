@@ -35,7 +35,7 @@ graph TD
   CLI --> evolve
   CLI --> rest[skills<br/>generate<br/>graph<br/>memory]
 
-  core --> student[Student: Qwen 7B<br/>llama-cpp :8000]
+  core --> student[Student: Qwen3.5-9B<br/>llama-cpp :8080]
   core --> teacher[Teacher: DeepSeek<br/>API]
 
 ```
@@ -148,8 +148,8 @@ graph TD
 | `export` | 3 | Package, list, info program exports |
 | `compare` | 1 | Side-by-side program comparison |
 | `doctor` | 1 | System diagnostics, environment check, dependency audit |
-| `graph`  | 14 | Query, stats, skill-tree, lineage, migrate, redis, search, status, dependents, add-dependency, record-program, flush, benchmark, cascade |
-| `memory` | 9 | FalkorDB-native persistent memory (add, search, get-all, get, update, delete, list, reset, stats) |
+| `graph`  | 14 | Query, stats, skill-tree, program-lineage, migrate, redis, search, status, dependents, add-dependency, record-program, flush, benchmark, cascade |
+| `memory` | 9 | FalkorDB-native persistent memory (add, search, list, get, update, delete, stats, reset, history) |
 
 ### 17+ DSPy Optimizers
 
@@ -255,7 +255,7 @@ graph LR
 | **Trace2Skill** | `trace2skill_evolve` |
 | **Paper Optimizers** | `spin_optimize`, `lse_explore`, `gepa_frontier`, `opsd_purify` |
 | **Diagnostics** | `doctor` |
-| **Cache** | `cache_stats`, `cache_invalidate` |
+| **Analysis Cache** | `analysis_cache_stats`, `analysis_cache_invalidate` |
 | **Agent** | `agent_run` |
 | **Generate** | `generate_llms_txt` |
 | **LoRA** | `lora_list_adapters`, `lora_load_adapter`, `lora_unload_adapter` |
@@ -288,13 +288,13 @@ graph LR
  A[CLI Introspection] --> B[Build Trainset]
  B --> C[Compile<br/>GEPA / LabeledFewShot]
  D[Local llama-cpp<br/>inference] -.-> C
- C --> E[(help_compiled.json<br/>cache)]
+ C --> E[(help/compiled.json<br/>cache)]
  E -.-> F["--help calls<br/>use compiled program"]
 ```
 
 - First run: `dspytools self optimize` compiles the help module
 - Subsequent `--help` calls use the compiled program
-- Cache at `~/.config/dspytools/help_compiled.json`
+- Cache at `~/.config/dspytools/help/compiled.json`
 - Force re-compile with `dspytools self optimize --force`
 
 ---
@@ -308,7 +308,7 @@ Token counting and cost estimation for every compile and inference call. Track L
 Monitor compiled programs for quality degradation over time. Get alerted when scores drop below baseline thresholds.
 
 ### Holdout Gate
-Programmatic enforcement of Invariant 5 — holdout data is split before any compile call and never seen by the optimizer. All GFL, compile, and evaluate commands enforce this gate. GFL pipeline splits holdout BEFORE optimizer runs, then uses the reserved holdout for SPRT post-compile validation.
+Programmatic enforcement of Invariant 5 — holdout data is split before any compile call and never seen by the optimizer. GFL and compile commands enforce this gate; `evaluate` scores against the devset you pass it and applies no holdout gate. GFL pipeline splits holdout BEFORE optimizer runs, then uses the reserved holdout for SPRT post-compile validation.
 
 ### SPRT Post-Compile Validation
 After the GFL pipeline selects the best optimizer, it runs Sequential Probability Ratio Test (SPRT, α=0.05, β=0.20) on the reserved holdout set. Early termination on clear wins (typically ~12 examples). If SPRT rejects the candidate, the pipeline falls back to baseline — never deploys a regressor.
@@ -424,7 +424,7 @@ dspytools compare <run-a> <run-b>
 dspytools pipeline compose pipeline.json --run
 
 # 10. Export a compiled program
-dspytools export program <run-id> --format json
+dspytools export package <run-id> --format zip # Zip package (program.json + metadata)
 
 # 11. Run MCP server (for AI assistant integration)
 dspytools mcp serve --transport stdio
@@ -432,7 +432,7 @@ dspytools mcp serve --transport stdio
 # 12. Manage LoRA adapters
 dspytools lora list
 dspytools lora load super ~/.config/dspytools/adapters/super
-dspytools lora test super
+dspytools lora chat super             # Chat with the adapter
 dspytools lora health
 
 # 13. Run distillation pipeline (creates training data for LoRA)
@@ -494,7 +494,7 @@ dspytools module delete <name>         # Delete module
 dspytools run predict <signature> -i <key>=<val>  # Standard prediction (--stream tokens)
 dspytools run cot <signature> -i <key>=<val>     # Chain-of-thought (--stream tokens)
 dspytools run react <signature> -i <key>=<val>    # ReAct agent (--parallel-tools, --resume-history <path>)
-dspytools run react-v2 <signature> -i <key>=<val>  # Legacy alias — now identical to `run react`
+dspytools run react-v2 <signature> -i <key>=<val>  # Legacy command name; lacks the history flags
 dspytools run pot <signature> -i <key>=<val>     # Program-of-Thought style (RLM-backed)
 dspytools run code-act <signature> -i <key>=<val>  # CodeAct style (RLM-backed with tools)
 dspytools run rlm <signature> -i <key>=<val>     # Recursive Language Model (--resume-history <path>)
@@ -576,7 +576,7 @@ dspytools tool python-interpreter        # Start Python sandbox
 
 ```bash
 dspytools evaluate run <module> <devset>     # Evaluate (module: run-id or program.json)
-dspytools evaluate run <run-id> -d dev.json --answer-field output  # Pick the graded field
+dspytools evaluate run <run-id> devset.json --answer-field output  # Pick the graded field
 dspytools evaluate list-metrics         # List available metrics
 ```
 
@@ -629,9 +629,9 @@ dspytools pipeline list             # List composed pipelines
 ### Program Export (`export`)
 
 ```bash
-dspytools export package <run-id> --format json # Export to JSON
-dspytools export package <run-id> --format onnx  # Export to ONNX
-dspytools export package <run-id> --format python # Export standalone Python
+dspytools export package <run-id> --format zip   # Package as .zip
+dspytools export package <run-id> --format tar   # Package as .tar
+dspytools export package <run-id> --format dir   # Copy into a plain directory
 dspytools export list              # List exported programs
 dspytools export info <run-id>          # Show export info
 ```
@@ -795,11 +795,11 @@ dspytools/
 ├── src/dspytools/       ← 100+ source files
 │  ├── main.py         ← CLI entry point (SelfOptimizingCLI)
 │  ├── commands/ (24)     ← CLI subcommand groups (including graph)
-│  ├── core/ (20)       ← Engine: hotswap, registry, setup, scheduler, output, mlflow, drift, holdout, retry, cost, loaders, metrics, errors, _embedder, _io, _dspy, mojo_bridge, sprt_mojo_bridge, logging_config, dspy_modules
+│  ├── core/ (21)       ← Engine: hotswap, registry, setup, scheduler, output, mlflow, drift, holdout, retry, cost, loaders, metrics, programs, errors, _embedder, _io, _dspy, mojo_bridge, sprt_mojo_bridge, logging_config, dspy_modules
 │  ├── mcp/ (3)        ← MCP server, tools, loader (65 tools)
-│  ├── gfl/ (12)        ← GFL: pipeline, budget, tracker, synthetic, meta_learn, feedback, decompose, ab_test, grpo, paper_optimizers, consolidation
-│  ├── evolve/ (8)       ← Self-evolve: engine, router, metrics + layers (action, contract, trajectory, __init__)
-│  ├── skills/ (5)       ← Skills: loader (BM25+embeddings), manager, discovery, __init__
+│  ├── gfl/ (12)        ← GFL: pipeline, budget, tracker, synthetic, meta_learn, feedback, decompose, ab_test, grpo, paper_optimizers, consolidation, __init__
+│  ├── evolve/ (8)       ← Self-evolve: self_evolve, router, metrics, __init__ + layers (action, contract, trajectory, __init__)
+│  ├── skills/ (5)       ← Skills: loader (BM25+embeddings), manager, discovery, bm25_mojo_bridge, __init__
 │  ├── generate/ (5)      ← llms.txt: cache, data, explorer, module, __init__
 │  ├── generators/ (3)     ← DSPy-native code generators (SignatureGeneratorDSPy, ModuleGeneratorDSPy)
 │  ├── graph/ (8)       ← FalkorDB: client, skill_graph, cache, migrate, redis_cache, benchmark, cache_mojo_bridge, __init__
@@ -813,7 +813,7 @@ dspytools/
 ├── AGENTS.md          ← DOX framework root
 ├── pyproject.toml       ← UV project + pyright + pytest config
 ├── .env.example        ← All configurable env vars documented
-└── .env            ← API keys + runtime config
+└── .env            ← Local API keys + runtime config (gitignored)
 ```
 
 ### Code Quality
