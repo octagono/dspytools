@@ -64,6 +64,7 @@ def _llm_help(ctx: click.Context) -> str | None:
     if cached is not None:
         return cached
 
+    from dspytools.core._dspy import dspy
     from dspytools.core.setup import LMRegistry
 
     lm = LMRegistry.get_or_default()
@@ -101,14 +102,18 @@ def _llm_help(ctx: click.Context) -> str | None:
         f"Include usage examples. Be concise (3-8 lines max)."
     )
 
-    response = lm(
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=max_tok,
-        temperature=0.3,
+    # `lm(messages=[...])` is not supported: a prompt is a canonical
+    # `dspy.lm15.Request` (system text lives in `Request.system`) and the call
+    # returns an lm15 `Response` whose `.text` is the assistant answer.
+    request = dspy.lm15.Request(
+        model=lm.model,
+        messages=(dspy.lm15.Message.user(prompt),),
+        config=dspy.lm15.Config(max_tokens=max_tok, temperature=0.3),
     )
+    response = lm(request)
 
-    answer = response[0] if isinstance(response, list) else str(response)
-    answer = answer.strip()
+    answer = response.text if isinstance(response, dspy.lm15.Response) else None
+    answer = (answer or "").strip()
     if answer and len(answer) > 20:
         _set_cache(key, answer)
         return answer

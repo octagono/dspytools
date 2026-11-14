@@ -58,6 +58,20 @@ When the user requests a durable behavior change, record it here or in the relev
 4. **No try/except around imports**: all packages are hard dependencies
 5. **Student LM (Qwen 7B local) for inference, Teacher (DeepSeek V4) for reflection only**
 6. **Ruff 0 errors required before commit**
+7. **`model_type="chat"` is the default**: llama.cpp serves only `/v1/chat/completions`; DSPy 3.5's `"auto"` routes to `/v1/responses`. Override with config `dspy.model_type`.
+8. **Thinking is controlled by `reasoning_effort`, not `chat_template_kwargs`**: 3.5 rejects the latter on the canonical Request path. `enable_thinking: false` → `reasoning_effort="none"`; `true`/absent → omit the dial.
+9. **No live LM in tests**: `dspy.utils.DummyLM` or a stub `complete(Request) -> Response` engine. vcrpy cannot intercept lm15's bundled raw-socket transports.
+
+## DSPy 3.5 Contracts
+
+- **Pin**: `dspy-ai==3.5.0` + `dspy[openai,numpy]>=3.5.0`. LiteLLM/OpenAI SDK are optional upstream; the `lm15` engine is bundled and is the only execution path this project uses.
+- **`dspy.ReAct` is the structured agent** (history + typed `submit` tool). `dspy.ReActV2` survives as a deprecated subclass until 3.6; CLI `react-v2` / `ReActV2` strings alias to `dspy.ReAct`. Results carry `termination_reason` (`submit`/`forced_submit`) and `history` (`dspy.History.messages`); a failed forced submit raises.
+- **Removed upstream**: `CodeAct`, `ProgramOfThought`, `dspy.experimental`, `TypedPredictor`, `Image.from_file`/`from_PIL`, `lm(messages=...)`, `Tool.format_as_litellm_function_call`. `dspytools run pot|code-act` map to `dspy.RLM`.
+- **Adapter**: upstream default is `XMLAdapter(use_native_function_calling=True)`; `dspytools` always selects one explicitly, so `settings.adapter` is never `None`. The code default is `baml`; `dspy.adapter` accepts `baml`/`chat`/`json`/`xml` and the configured value wins (`dspytools configure dspy show`).
+- **Reasoning fields**: `ChainOfThought` rationale is `dspy.Reasoning`/`None`, not `str`; it is str-like but fails `isinstance(x, str)` and `json.dumps`. Opt into text with `rationale_field_type=str`.
+- **GEPA/Flex/RLM are graduated** (no `dspy.experimental`). GEPA kwargs are validated against the installed constructor — accept, never hardcode a version list.
+- **Caches**: restricted deserialization is the default (canonical v2 keys invalidate old entries); `configure_cache(safe_types=...)` is the only widening knob.
+- **Not adopted**: rich tool results (images/files from tools). The `chat`/chat-completions presets declare `tool_result_media="reject"` in lm15, so a media part in a tool result aborts the agent mid-turn. Revisit only with a media-capable route and `mcp/loader.py` emitting `dspy.Image` parts behind an explicit flag.
 
 ## Project Map
 
@@ -97,7 +111,7 @@ dspytools/
 
 ## Child DOX Index
 
-Root governs the dspytools project — DSPy 3.3.1 examples running on Qwen3.5-9B via llama-cpp-server with MCP-git agentic tools (dspy-ai==3.3.1 pin; Flex, ReActV2, RLM, GEPA cost-aware optimization supported). Thirteen child AGENTS.md files in `src/dspytools/*/`:
+Root governs the dspytools project — DSPy 3.5.0 examples running on Qwen3.5-9B via llama-cpp-server with MCP-git agentic tools (dspy-ai==3.5.0 pin; Flex, ReAct, RLM, GEPA cost-aware optimization supported). Thirteen child AGENTS.md files in `src/dspytools/*/`:
 
 | Directory | Scope |
 |-----------|-------|
@@ -118,7 +132,7 @@ Root governs the dspytools project — DSPy 3.3.1 examples running on Qwen3.5-9B
 ## Quick Commands
 
 ```bash
-pytest tests/ -q              # 363 tests, ~6s (no live LLM needed; 4 recorded-LM behavior tests replay cassettes)
+pytest tests/ -q              # 369 hermetic tests, ~5s (DummyLM only; 20 Redis/FalkorDB failures when no container is up)
 ruff check                     # zero errors required
 dspytools --help               # explore all 24 commands
 dspytools self auto-fix         # inspect and fix drift-degraded programs
@@ -142,4 +156,4 @@ Five-stage pipeline. See `docs/ci-cd-plan.md` for full architecture.
 - **Self-hosted runner**: local machine polls GitHub for jobs via `~/actions-runner/run.sh`
 - **Golden dataset**: `data/golden_eval.jsonl` (50 examples) + `data/golden_baseline.json` (tracked score)
 - **Regression gate**: nightly evaluation must score >= 90% of baseline or pipeline halts
-- **vcrpy cassettes**: `tests/cassettes/` for hermetic LLM mocking (set `VCR_RECORD=1` to record)
+- **No LLM mocking middleware**: cassettes were removed — lm15 writes through bundled raw-socket transports, so vcrpy cannot intercept it. Tests use `DummyLM` or a stub `complete(Request) -> Response` engine; `DSPYTOOLS_LIVE_LM=1` opts into the local llama.cpp lane.

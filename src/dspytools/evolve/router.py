@@ -161,9 +161,8 @@ def _build_router_tools() -> list[dspy.Tool]:
 class RouterAgent:
     """Self-evolving router that selects the best program and auto-optimizes.
 
-    Uses ReAct v1 (text-based Thought/Action/Observation parsing) for
-    compatibility with small models like Qwen 7B that can't produce
-    the structured ToolCalls JSON expected by ReActV2.
+    Uses ``dspy.ReAct`` — since DSPy 3.5 that *is* the structured agent loop
+    (typed ``submit`` tool, ``History`` trace, ``termination_reason``).
     """
 
     def __init__(self, max_iters: int = 10):
@@ -183,7 +182,9 @@ class RouterAgent:
     def ask(self, question: str) -> dict:
         """Route a query and return the answer with metadata."""
         result = self.agent(question=question)  # type: ignore[arg-type]
-        answer = getattr(result, "answer", str(result))
+        answer = getattr(result, "answer", None) or ""
+        termination = getattr(result, "termination_reason", "unknown")
+        turns = len(getattr(getattr(result, "history", None), "messages", None) or [])
 
         # Auto-evaluate quality
         score = auto_metric(answer)
@@ -192,6 +193,8 @@ class RouterAgent:
                 "question": question[:100],
                 "score": score,
                 "program": self.mgr.active_id,
+                "termination_reason": termination,
+                "turns": turns,
             }
         )
 
@@ -200,6 +203,7 @@ class RouterAgent:
             "score": score,
             "active_program": self.mgr.active_id,
             "needs_optimization": score < 0.4,
+            "termination_reason": termination,
         }
 
     def evolve(self) -> dict:

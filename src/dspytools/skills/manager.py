@@ -85,7 +85,11 @@ signature: {signature}
                 k=min(4, len(trainset or []))
             ).compile(student=student, trainset=trainset or []),
             "bootstrap_few_shot": lambda: dspy.BootstrapFewShot(
-                metric=metric, max_labeled_demos=4, max_bootstrapped_demos=4
+                metric=metric,
+                # None keeps metric truthiness; 0 would accept every score >= 0.
+                metric_threshold=None,
+                max_labeled_demos=4,
+                max_bootstrapped_demos=4,
             ).compile(student=student, trainset=trainset or []),
         }
 

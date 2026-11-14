@@ -474,10 +474,10 @@ class GFLPipeline:
         # student. Without it, optimizers bootstrap with the student-as-teacher,
         # which fails for tool-use/ReAct tasks the student can't do yet.
         #
-        # DSPy 3.3.0b1: BootstrapFewShot.compile()/MIPROv2.compile() expect a
-        # teacher MODULE (must have .deepcopy()), not a raw dspy.LM. Build the
-        # teacher module by copying the student and pointing all its predictors
-        # at the teacher LM (set_lm recurses into nested predictors).
+        # BootstrapFewShot.compile()/MIPROv2.compile() expect a teacher MODULE
+        # (must have .deepcopy()), not a raw dspy.LM. Build the teacher module by
+        # copying the student and pointing all its predictors at the teacher LM
+        # (set_lm recurses into nested predictors).
         teacher_lm = LMRegistry.get_teacher()
         teacher = None
         if teacher_lm is not None:
@@ -485,12 +485,24 @@ class GFLPipeline:
             teacher = student.deepcopy()
             teacher.set_lm(teacher_lm)
         # GEPA uses reflection_lm (raw LM) for proposing new instructions, not a
-        # teacher module — keep the raw LM there.
+        # teacher module — keep the raw LM there. GEPA asserts a reflection LM is
+        # present, so surface that as a ValueError (the documented degraded path)
+        # instead of letting an AssertionError kill the whole comparison.
         reflection_lm = teacher_lm
+        if reflection_lm is None and name in ("gepa", "sequential"):
+            raise ValueError(
+                f"{name} needs a teacher LM for reflection; configure one with "
+                "`dspytools configure lm set --role teacher`"
+            )
 
         optimizers = {
+            # metric_threshold=None keeps metric truthiness (a threshold of 0
+            # would accept every score >= 0).
             "bootstrap_few_shot": lambda: dspy.BootstrapFewShot(
-                metric=metric, max_labeled_demos=4, max_bootstrapped_demos=4
+                metric=metric,
+                metric_threshold=None,
+                max_labeled_demos=4,
+                max_bootstrapped_demos=4,
             ).compile(student=student, trainset=trainset, teacher=teacher),
             "mipro": lambda: dspy.MIPROv2(metric=metric, auto="light").compile(
                 student=student, trainset=trainset, teacher=teacher
@@ -506,7 +518,7 @@ class GFLPipeline:
                     reflection_lm=reflection_lm,
                 ),
             ).compile(
-                student=student,
+                student=self._with_default_lm(student),
                 strategy="p",
                 **self._valset_kwargs(trainset),
             ),
@@ -524,6 +536,17 @@ class GFLPipeline:
         return dspy.LabeledFewShot(k=min(4, len(trainset))).compile(
             student=student, trainset=trainset
         )
+
+    @staticmethod
+    def _with_default_lm(student: Any) -> Any:
+        """Copy the student and pin an explicit LM on every predictor.
+
+        BetterTogether asserts that all predictors carry an explicit LM; a
+        module relying on the global ``dspy.settings.lm`` would be rejected.
+        """
+        program = student.deepcopy()
+        program.set_lm(LMRegistry.get_or_default())
+        return program
 
     @staticmethod
     def _valset_kwargs(trainset: list) -> dict:

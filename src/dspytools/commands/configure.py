@@ -192,10 +192,10 @@ def adapter_set(type: str):
 def adapter_list():
     """List available adapter types."""
     for name, desc in {
-        "chat": "ChatAdapter — default, [[ ## field ## ]] delimiters",
-        "json": "JSONAdapter — JSON input/output",
-        "xml": "XMLAdapter — XML-tagged prompts",
-        "baml": "BAMLAdapter — compact nested Pydantic schema",
+        "chat": "ChatAdapter — [[ ## field ## ]] delimiters, native tool calls off",
+        "json": "JSONAdapter — JSON input/output, native tool calls on",
+        "xml": "XMLAdapter — XML-tagged prompts, native tool calls off",
+        "baml": "BAMLAdapter — compact nested Pydantic schema (default)",
     }.items():
         click.echo(f"  {name}: {desc}")
 
@@ -205,22 +205,61 @@ def cache_cmd():
     """Manage DSPy cache."""
 
 
+def _resolve_safe_types(specs: tuple[str, ...]) -> list[type] | None:
+    """Resolve `module:Class` / `module.Class` spellings into the types that
+    restricted unpickling is allowed to load. Returns None when none given."""
+    if not specs:
+        return None
+    from importlib import import_module
+
+    resolved: list[type] = []
+    for spec in specs:
+        separator = ":" if ":" in spec else "."
+        module_name, _, attr = spec.rpartition(separator)
+        if not module_name or not attr:
+            raise click.ClickException(
+                f"safe type must be 'module:Class' or 'module.Class', got {spec!r}"
+            )
+        try:
+            obj = getattr(import_module(module_name), attr)
+        except (ImportError, AttributeError) as exc:
+            raise click.ClickException(
+                f"cannot resolve safe type {spec!r}: {exc}"
+            ) from exc
+        if not isinstance(obj, type):
+            raise click.ClickException(f"safe type {spec!r} is not a class")
+        resolved.append(obj)
+    return resolved
+
+
 @cache_cmd.command(name="enable", cls=LLMCommand)
-def cache_enable():
-    """Enable DSPy cache with secure pickle."""
+@click.option(
+    "--safe-type",
+    "safe_types",
+    multiple=True,
+    metavar="MODULE:CLASS",
+    help=(
+        "Extra type restricted unpickling may load (repeatable), "
+        "e.g. dspy.signatures.field.InputField"
+    ),
+)
+def cache_enable(safe_types: tuple[str, ...]):
+    """Enable DSPy cache with secure (restricted) pickle loading."""
     from dspytools.core._dspy import dspy
 
-    dspy.configure_cache(restrict_pickle=True)
+    dspy.configure_cache(
+        restrict_pickle=True, safe_types=_resolve_safe_types(safe_types)
+    )
     click.echo("  Cache enabled (restricted pickle)")
 
 
 @cache_cmd.command(name="disable", cls=LLMCommand)
 def cache_disable():
-    """Disable DSPy cache."""
+    """Allow unrestricted (unsafe) pickle loading from cache entries."""
     from dspytools.core._dspy import dspy
 
     dspy.configure_cache(restrict_pickle=False)
-    click.echo("  Cache disabled")
+    click.echo("  Restricted pickle disabled (unrestricted cache loading)")
 
 
 @cache_cmd.command(name="clear", cls=LLMCommand)
@@ -265,6 +304,12 @@ def dspy_cmd():
     help="Include tracebacks in errors",
 )
 @click.option("--warn-type/--no-warn-type", default=None, help="Warn on type mismatch")
+@click.option(
+    "--model-type",
+    type=click.Choice(["chat", "auto", "responses", "text"]),
+    default=None,
+    help="LM API family for new LMs (default: chat — local servers serve /v1/chat/completions only)",
+)
 @click.option("--apply", is_flag=True, help="Apply configuration immediately")
 def dspy_set(
     track_usage: bool | None,
@@ -276,6 +321,7 @@ def dspy_set(
     allow_async_sync: bool | None,
     provide_traceback: bool | None,
     warn_type: bool | None,
+    model_type: str | None,
     apply: bool,
 ):
     """Set DSPy runtime configuration settings."""
@@ -303,10 +349,16 @@ def dspy_set(
         settings["warn_on_type_mismatch"] = warn_type
 
     cfg["dspy"].update(settings)
+    if model_type is not None:
+        # Read by LMRegistry when it builds dspy.LM instances — not a
+        # dspy.configure() setting, so it stays out of `settings`.
+        cfg["dspy"]["model_type"] = model_type
     save_user_config(cfg)
 
     for k, v in settings.items():
         click.echo(f"  {k}: {v}")
+    if model_type is not None:
+        click.echo(f"  model_type: {model_type}")
 
     if apply:
         from dspytools.core._dspy import dspy
@@ -339,6 +391,9 @@ def dspy_show():
         current = dspy_cfg.get(k, default)
         marker = " (custom)" if k in dspy_cfg else ""
         click.echo(f"  {k}: {current}{marker}")
+
+    click.echo(f"  model_type: {dspy_cfg.get('model_type', 'chat')}")
+    click.echo(f"  adapter: {dspy_cfg.get('adapter', 'baml')}")
 
 
 @dspy_cmd.command(name="optimize", cls=LLMCommand)

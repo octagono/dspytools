@@ -13,7 +13,7 @@ from typing import Any
 
 
 class _LazyDSPy:
-    """Lazy import wrapper for dspy — defers heavy LiteLLM import chain."""
+    """Lazy import wrapper for dspy — defers the heavy dspy import chain."""
 
     _module: Any = None
 

@@ -19,6 +19,26 @@ from dspytools.generators import ModuleGeneratorDSPy
 # CLI Commands
 # ---------------------------------------------------------------------------
 
+# Legacy ``--type`` aliases. DSPy 3.5 made ``dspy.ReAct`` the structured agent
+# loop (the old ReActV2) and deprecated the ReActV2 name, so old invocations
+# and saved configs that still say "reactv2" map onto ReAct.
+_MODULE_TYPE_ALIASES = {
+    "reactv2": "ReAct",
+    "react-v2": "ReAct",
+    "react_v2": "ReAct",
+}
+
+
+class _ModuleTypeChoice(click.Choice):
+    """``click.Choice`` that resolves legacy module-type aliases first."""
+
+    def convert(self, value, param, ctx):
+        if isinstance(value, str):
+            aliased = _MODULE_TYPE_ALIASES.get(value.strip().lower())
+            if aliased is not None:
+                value = aliased
+        return super().convert(value, param, ctx)
+
 
 @click.group(name="module", cls=LLMGroup)
 def module_cmd():
@@ -36,18 +56,18 @@ def module_cmd():
     "-t",
     "mod_type",
     default="Predict",
-    type=click.Choice(
+    type=_ModuleTypeChoice(
         [
             "Predict",
             "ChainOfThought",
-            "ReActV2",
+            "ReAct",
             "MultiChainComparison",
             "Tool",
             "Generate",
             "Flex",
         ]
     ),
-    help="Module type (default: Predict)",
+    help="Module type (default: Predict; legacy 'ReActV2' maps to ReAct)",
 )
 @click.option("--instructions", "-i", help="Class docstring or system prompt")
 @click.option(

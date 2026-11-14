@@ -201,9 +201,18 @@ def embedding_model() -> str:
 
 
 def embedder_kwargs() -> dict:
-    """Embedding config for dspy.Embedder — model + url + api_key. Single source of truth."""
+    """Embedding config for dspy.Embedder — model + url + api_key. Single source of truth.
+
+    dspy.Embedder's hosted models accept only a bare OpenAI model name or an
+    ``openai/``/``azure/`` prefix (other prefixes raise ValueError), and maps
+    ``api_base`` onto the OpenAI SDK's ``base_url``.  ``llama_cpp/`` is an
+    OpenAI-compatible server prefix from older configs — rewrite it to
+    ``openai/`` so both spellings keep working.
+    """
     model = embedding_model()
-    if not model.startswith(("openai/", "llama_cpp/", "text-")):
+    if model.startswith("llama_cpp/"):
+        model = f"openai/{model.split('/', 1)[1]}"
+    elif not model.startswith(("openai/", "azure/", "text-")):
         model = f"openai/{model}"
     return {
         "model": model,

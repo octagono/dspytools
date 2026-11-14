@@ -8,6 +8,9 @@ import json
 import json as _json
 import re as _re
 import time
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
@@ -26,7 +29,7 @@ from dspytools.cli.output import panel as rich_panel
 from dspytools.cli.output import spinner as rich_spinner
 from dspytools.cli.output import table as rich_table
 from dspytools.cli.rich_config import LLMCommand, LLMGroup, click
-from dspytools.config.settings import embedder_kwargs
+from dspytools.config.settings import data_dir, embedder_kwargs
 from dspytools.core.setup import LMRegistry, setup_dspy
 
 # ── Colour palette constants ────────────────────────────────────────────
@@ -66,6 +69,25 @@ def _show_timing(start: float) -> None:
     info(f"Time:  [{_DIM}]{elapsed:.2f}s[/]")
 
 
+# Fields DSPy 3.5 attaches to a Prediction alongside the user's outputs
+# (ReAct: history/termination_reason, RLM: history/final_reasoning/trajectory).
+_RESULT_META_FIELDS = frozenset(
+    {"history", "termination_reason", "final_reasoning", "trajectory"}
+)
+
+
+def _result_fields(result: Any) -> list[str]:
+    """Return a Prediction's declared output fields (DSPy 3.5 has no
+    ``_output_field_names``; fall back to the underlying store)."""
+    names = getattr(result, "_output_field_names", None)
+    if names:
+        return list(names)
+    store = getattr(result, "_store", None)
+    if isinstance(store, dict):
+        return [name for name in store if name not in _RESULT_META_FIELDS]
+    return []
+
+
 def _show_result(
     result: Any,
     *,
@@ -73,25 +95,39 @@ def _show_result(
     border: str = _RESULT,
 ) -> None:
     """Display a DSPy prediction in a panel with labelled output fields."""
-    if hasattr(result, "_output_field_names"):
-        names = result._output_field_names
-        lines = [
-            f"[{_CYAN}]{fname}:[/]  {getattr(result, fname, '')}"
-            for fname in names
-            if getattr(result, fname, "")
-        ]
-        content = "\n".join(lines) if lines else str(result)
-    else:
-        content = str(result)
+    names = _result_fields(result)
+    lines = [
+        f"[{_CYAN}]{fname}:[/]  {getattr(result, fname, '')}"
+        for fname in names
+        if getattr(result, fname, "")
+    ]
+    content = "\n".join(lines) if lines else str(result)
     rich_panel(title, content, border_style=border)
 
 
 def _show_answer(result_or_str: Any) -> None:
     """Show a simple answer in a panel."""
-    if hasattr(result_or_str, "_output_field_names"):
+    if _result_fields(result_or_str):
         _show_result(result_or_str)
         return
     rich_panel("Answer", str(result_or_str), border_style=_RESULT)
+
+
+def _show_react_trace(result: Any) -> None:
+    """Show a ReAct Prediction's termination reason and turn count.
+
+    DSPy 3.5 returns ``termination_reason`` (``submit`` or ``forced_submit``)
+    and the structured ``history`` instead of the old trajectory dict.
+    """
+    term = getattr(result, "termination_reason", None)
+    turns = len(getattr(getattr(result, "history", None), "messages", None) or [])
+    parts = []
+    if term:
+        parts.append(f"Terminated: [{_CYAN}]{term}[/]")
+    if turns:
+        parts.append(f"Turns: [{_DIM}]{turns}[/]")
+    if parts:
+        info("  ".join(parts))
 
 
 # ── Tool loading ────────────────────────────────────────────────────────
@@ -204,8 +240,6 @@ def _run_module(
     adapter: str,
 ) -> None:
     """Generic runner for Predict and ChainOfThought."""
-    from dspy.adapters.baml_adapter import BAMLAdapter
-
     _show_command_header(module_type)
     _show_inputs(_parse_inputs(inputs))
     _show_model_info(lm)
@@ -220,14 +254,19 @@ def _run_module(
         "chat": dspy.ChatAdapter(),
         "json": dspy.JSONAdapter(),
         "xml": dspy.XMLAdapter(),
-        "baml": BAMLAdapter(use_native_function_calling=False),
     }
     adapter_obj = adapters.get(adapter)
+    if adapter_obj is None:
+        # BAMLAdapter is not exported at the dspy top level — import it only
+        # when it is actually selected (or as the unknown-adapter fallback).
+        from dspy.adapters.baml_adapter import BAMLAdapter
+
+        adapter_obj = BAMLAdapter(use_native_function_calling=False)
 
     sp = rich_spinner()
     with sp:
         sp.add_task(f"Running {module_type}...")
-        with dspy.context(adapter=adapter_obj or adapters["baml"]):
+        with dspy.context(adapter=adapter_obj):
             modules = {
                 "predict": dspy.Predict(signature),
                 "cot": dspy.ChainOfThought(signature),
@@ -260,7 +299,7 @@ _MODULE_TYPES = {
     "predict": ("Predict", "dspy.Predict(signature)"),
     "cot": ("ChainOfThought", "dspy.ChainOfThought(signature)"),
     "react": ("ReAct", "dspy.ReAct(signature, tools=[...])"),
-    "react-v2": ("ReActV2", "dspy.ReActV2(signature, tools=[...])"),
+    "react-v2": ("ReAct", "dspy.ReAct(signature, tools=[...])"),
     "pot": ("RLM", "dspy.RLM(signature, max_iters=10)"),
     "code-act": ("RLM", "dspy.RLM(signature, tools=[...], max_iters=10)"),
     "rlm": ("RLM", "dspy.RLM(signature, max_iters=20)"),
@@ -376,6 +415,7 @@ def run_react(
         result = dspy.ReAct(signature, tools=dspy_tools, max_iters=max_iters)(**kwargs)
 
     _show_answer(result)
+    _show_react_trace(result)
     _show_timing(t0)
 
 
@@ -399,9 +439,13 @@ def run_react_v2(
     temperature: float,
     max_tokens: int,
 ):
-    """Run a ReActV2 agent with tools.  When the model does not produce
-    ``submit`` tool calls, the CLI extracts the answer from its last
-    output (``next_thought``) automatically."""
+    """Run the structured ReAct agent with tools (legacy command name).
+
+    In DSPy 3.5 ``dspy.ReAct`` *is* the structured loop: the model calls the
+    typed ``submit`` tool and the result carries the declared outputs plus
+    ``termination_reason`` (``submit`` / ``forced_submit``) and a structured
+    ``history``. A forced final submit that produces no usable outputs raises.
+    """
 
     _show_command_header("react-v2")
     _show_inputs(_parse_inputs(inputs))
@@ -415,83 +459,101 @@ def run_react_v2(
     dspy_tools = _load_tools(tools)
     kwargs = _parse_inputs(inputs)
 
+    agent = dspy.ReAct(signature, tools=dspy_tools, max_iters=max_iters)
+
     sp = rich_spinner()
     with sp:
         sp.add_task("Thinking...")
-        result = dspy.ReActV2(signature, tools=dspy_tools, max_iters=max_iters)(
-            **kwargs
-        )
+        try:
+            result = agent(**kwargs)
+        except ValueError as err:
+            # 3.5 raises when the forced submit yields no usable outputs.
+            # Surface it instead of guessing an answer from the raw LM text.
+            rich_panel("ReAct failed", str(err), border_style=_ERROR)
+            last_reply = _extract_reply_from_lm_history()
+            if last_reply:
+                rich_panel("Last model output", last_reply, border_style=_YELLOW)
+            _show_timing(t0)
+            raise click.ClickException(str(err)) from err
 
-    term = getattr(result, "termination_reason", "unknown")
-    answer = getattr(result, "answer", None)
+    _show_answer(result)
+    _show_react_trace(result)
 
-    if answer is not None:
-        _show_answer(answer)
-    elif term in ("empty_tool_calls", "parse_error", "failed", "max_iters"):
-        fallback = None
-
-        # 1) Try the ReActV2 history
-        history = getattr(result, "history", None)
-        last_tool_result = None
-        last_thought = None
-        if history and history.messages:
-            for msg in reversed(history.messages):
-                tc = msg.get("tool_calls")
-                if tc is not None:
-                    tcr = getattr(tc, "tool_call_results", None)
-                    if tcr and tcr.tool_call_results:
-                        last_tool_result = str(tcr.tool_call_results[-1].value)
-                thought = msg.get("next_thought")
-                if thought and last_thought is None:
-                    last_thought = thought
-        fallback = last_tool_result or last_thought
-
-        # 2) Fall back to raw LM output
-        fallback = fallback or _extract_reply_from_lm_history()
-
-        if fallback:
-            rich_panel("Answer", fallback, border_style=_RESULT)
-        else:
-            info(f"[{_YELLOW}]ReActV2 terminated with[/] [bold]{term}[/]")
-
-        used = [t.name for t in dspy_tools] if dspy_tools else []
-        if used:
-            info(f"Tools: [{_DIM}]{', '.join(f'[bold]{n}[/]' for n in used)}[/]")
-    else:
-        info(f"[{_YELLOW}]Unexpected termination:[/] {term}")
+    used = [t.name for t in dspy_tools] if dspy_tools else []
+    if used:
+        info(f"Tools: [{_DIM}]{', '.join(f'[bold]{n}[/]' for n in used)}[/]")
 
     _show_timing(t0)
 
 
-def _extract_reply_from_lm_history() -> str | None:
-    """Extract the model's ``next_thought`` from the raw LM output history."""
+def _next_thought_from_output(text: str) -> str | None:
+    """Pull ``next_thought`` out of one LM output in any adapter format.
 
-    raw_hist = (
-        getattr(dspy.settings.lm, "history", None)
-        if hasattr(dspy, "settings")
-        else None
-    )
+    DSPy 3.5 renders the ReAct ``next_thought`` field as ChatAdapter sections
+    (``[[ ## next_thought ## ]]``), XML (``<next_thought>``) or a JSON object,
+    depending on the active adapter.
+    """
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            parsed = _json.loads(stripped)
+        except _json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and parsed.get("next_thought"):
+            return str(parsed["next_thought"]).strip()
+    for pattern in (
+        r"\[\[ ## next_thought ## \]\]\s*(.+?)\s*(?:\[\[ ## |\Z)",
+        r"<next_thought>\s*(.+?)\s*</next_thought>",
+    ):
+        m = _re.search(pattern, text, _re.DOTALL)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def _extract_reply_from_lm_history() -> str | None:
+    """Extract the model's ``next_thought`` from the raw LM call history.
+
+    DSPy 3.5 records canonical Request/Response entries: ``outputs`` holds
+    plain strings for text completions and dicts carrying ``text`` /
+    ``tool_calls`` for native tool-calling responses.
+    """
+
+    lm_obj = getattr(dspy.settings, "lm", None)
+    raw_hist = getattr(lm_obj, "history", None)
     if not raw_hist:
         return None
     for call in reversed(raw_hist):
         for output in reversed(call.get("outputs") or []):
-            if not isinstance(output, str):
+            text = output.get("text") if isinstance(output, dict) else output
+            if not isinstance(text, str) or not text.strip():
                 continue
-            m = _re.search(
-                r"\[\[ ## next_thought ## \]\]\s*(.+?)\s*\[\[ ## tool_calls ## \]\]",
-                output,
-                _re.DOTALL,
-            )
-            if m:
-                return m.group(1).strip()
-            parsed = _json.loads(output)
-            nt = parsed.get("next_thought")
-            if nt:
-                return nt.strip()
+            thought = _next_thought_from_output(text)
+            if thought:
+                return thought
     return None
 
 
 # ── flex ──────────────────────────────────────────────────────────────────
+
+
+@contextmanager
+def _interpreter_factory(pool_size: int = 0):
+    """Yield an interpreter factory for the Flex/RLM sandbox paths.
+
+    ``pool_size=0`` (the default) yields ``None`` so the module keeps DSPy's
+    own one-interpreter-per-invocation behaviour. A positive size yields a
+    ``dspy.InterpreterPool`` that prewarms that many interpreters and is always
+    closed (idle sandboxes shut down) when the command finishes.
+    """
+    if pool_size <= 0:
+        yield None
+        return
+    pool = dspy.InterpreterPool(size=pool_size)
+    try:
+        yield pool
+    finally:
+        pool.close()
 
 
 @run_cmd.command(name="flex", cls=LLMCommand)
@@ -501,7 +563,21 @@ def _extract_reply_from_lm_history() -> str | None:
 @click.option("--lm", help="LM model to use")
 @click.option("--temperature", type=float, default=0.2)
 @click.option("--max-tokens", type=int, default=4096)
-@click.option("--max-predictor-calls", type=int, default=100)
+@click.option(
+    "--max-predictor-calls",
+    type=int,
+    default=100,
+    help=(
+        "Cap on LM calls per forward, including nested/candidate calls "
+        "(DSPy 3.5 counts every call)"
+    ),
+)
+@click.option(
+    "--interpreter-pool-size",
+    type=int,
+    default=0,
+    help="Prewarm N sandbox interpreters via dspy.InterpreterPool (0 = off)",
+)
 def run_flex(
     signature: str,
     inputs: tuple[str, ...],
@@ -510,6 +586,7 @@ def run_flex(
     temperature: float,
     max_tokens: int,
     max_predictor_calls: int,
+    interpreter_pool_size: int,
 ):
     """Run a dspy.Flex program (optimizable module code).
 
@@ -522,6 +599,8 @@ def run_flex(
     if tools:
         info(f"Tools: [bold]{', '.join(tools)}[/]")
     info(f"Max predictor calls: [{_DIM}]{max_predictor_calls}[/]")
+    if interpreter_pool_size:
+        info(f"Interpreter pool: [{_DIM}]{interpreter_pool_size}[/]")
 
     t0 = time.time()
     setup_dspy(model=lm, temperature=temperature, max_tokens=max_tokens)
@@ -529,12 +608,14 @@ def run_flex(
     kwargs = _parse_inputs(inputs)
 
     sp = rich_spinner()
-    with sp:
+    with sp, _interpreter_factory(interpreter_pool_size) as factory:
         sp.add_task("Running Flex...")
+        extra = {"interpreter_factory": factory} if factory is not None else {}
         prog = dspy.Flex(
             signature,
             tools=dspy_tools or None,
             max_predictor_calls=max_predictor_calls,
+            **extra,
         )
         try:
             result = prog(**kwargs)
@@ -566,8 +647,8 @@ def run_pot(
 ):
     """Run a ProgramOfThought-style module on the RLM engine.
 
-    dspy.ProgramOfThought is deprecated in DSPy 3.3.1 (removal in 3.5) with
-    RLM as its replacement. This command keeps the familiar ``pot`` surface but
+    ``dspy.ProgramOfThought`` was removed in DSPy 3.5 and RLM is its
+    replacement. This command keeps the familiar ``pot`` surface but
     executes on the sandboxed RLM REPL (reasoning via code execution).
     """
     _show_command_header("pot")
@@ -612,9 +693,9 @@ def run_code_act(
 ):
     """Run a CodeAct-style module on the RLM engine.
 
-    dspy.CodeAct is deprecated in DSPy 3.3.1 (removal in 3.5) with RLM as its
-    replacement. This command keeps the familiar ``code-act`` surface but
-    executes on the sandboxed RLM REPL (code generation + tool execution).
+    ``dspy.CodeAct`` was removed in DSPy 3.5 and RLM is its replacement. This
+    command keeps the familiar ``code-act`` surface but executes on the
+    sandboxed RLM REPL (code generation + tool execution).
     """
     _show_command_header("code-act")
     _show_inputs(_parse_inputs(inputs))
@@ -645,6 +726,42 @@ def run_code_act(
 # ── rlm ──────────────────────────────────────────────────────────────────
 
 
+def _load_rlm_history(path: Path | None) -> dspy.History | None:
+    """Load a saved RLM history for replay.
+
+    History replays conversation evidence only — live Python variables are
+    not restored — and the loaded object is passed as the ``history`` input
+    without being modified. A bad file raises a clean CLI error.
+    """
+    if path is None:
+        return None
+    try:
+        history = dspy.History.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as err:
+        raise click.ClickException(f"cannot resume from {path}: {err}") from err
+    info(f"Resumed: [{_DIM}]{path}[/] ({len(history.messages)} turns)")
+    return history
+
+
+def _save_rlm_history(history: Any) -> None:
+    """Persist an RLM ``History`` as JSON for later ``--resume-history``.
+
+    ``run rlm`` keeps no run directory, so the file lands flat in the toolkit's
+    data dir — where the command's other one-off runtime state lives. Empty
+    histories are skipped, and a write failure warns instead of failing an
+    otherwise successful run.
+    """
+    if not getattr(history, "messages", None):
+        return
+    path = data_dir() / f"rlm_history_{datetime.now():%Y%m%d_%H%M%S}.json"
+    try:
+        path.write_text(history.model_dump_json(), encoding="utf-8")
+    except (OSError, ValueError) as err:
+        warn(f"could not save RLM history: {err}")
+        return
+    info(f"History: [{_DIM}]{path}[/]  resume with --resume-history {path}")
+
+
 @run_cmd.command(name="rlm", cls=LLMCommand)
 @click.argument("signature")
 @click.option("--inputs", "-i", multiple=True, help="Inputs as KEY=VALUE")
@@ -655,6 +772,21 @@ def run_code_act(
 @click.option("--max-llm-calls", default=30, type=int)
 @click.option("--lm", help="Main LM")
 @click.option("--sub-lm", help="Sub-LLM for llm_query() calls")
+@click.option(
+    "--interpreter-pool-size",
+    type=int,
+    default=0,
+    help="Prewarm N sandbox interpreters via dspy.InterpreterPool (0 = off)",
+)
+@click.option(
+    "--resume-history",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Resume from a saved RLM history JSON (replays conversation evidence "
+        "only; Python variables are not restored)"
+    ),
+)
 def run_rlm(
     signature: str,
     inputs: tuple[str, ...],
@@ -663,6 +795,8 @@ def run_rlm(
     max_llm_calls: int,
     lm: str | None,
     sub_lm: str | None,
+    interpreter_pool_size: int,
+    resume_history: Path | None,
 ):
     """Run a Recursive Language Model (RLM) module."""
     _show_command_header("rlm")
@@ -676,25 +810,35 @@ def run_rlm(
         f"Iterations: [{_DIM}]{max_iters}[/]   "
         f"Max LLM calls: [{_DIM}]{max_llm_calls}[/]"
     )
+    if interpreter_pool_size:
+        info(f"Interpreter pool: [{_DIM}]{interpreter_pool_size}[/]")
+
+    # Load before configuring the LM so a bad file fails fast and cleanly.
+    history = _load_rlm_history(resume_history)
 
     t0 = time.time()
     setup_dspy(model=lm, temperature=0.2, max_tokens=4096)
     kwargs = _parse_inputs(inputs)
     dspy_tools = _load_tools(tools)
     sub_lm_obj = LMRegistry.get(model=sub_lm, temperature=0.0) if sub_lm else None
+    if history is not None:
+        kwargs["history"] = history
 
     sp = rich_spinner()
-    with sp:
+    with sp, _interpreter_factory(interpreter_pool_size) as factory:
         sp.add_task("Running RLM...")
+        extra = {"interpreter_factory": factory} if factory is not None else {}
         result = dspy.RLM(
             signature,
             tools=dspy_tools,
             max_iters=max_iters,
             max_llm_calls=max_llm_calls,
             sub_lm=sub_lm_obj,
+            **extra,
         )(**kwargs)
 
     _show_answer(result)
+    _save_rlm_history(getattr(result, "history", None))
     _show_timing(t0)
 
 
@@ -823,10 +967,10 @@ def run_multi_chain(
             fail(f"MultiChainComparison judge failed: {e}")
             raise click.ClickException(f"MultiChainComparison judge failed: {e}")
 
-    if hasattr(result, "_output_field_names"):
+    if _result_fields(result):
         parts = [
             getattr(result, fname, "")
-            for fname in result._output_field_names
+            for fname in _result_fields(result)
             if getattr(result, fname, "") and fname != "rationale"
         ]
         rich_panel("Best Answer", "\n".join(parts), border_style=_RESULT)
@@ -859,7 +1003,27 @@ def run_list():
 @click.option("--modules", "-m", multiple=True, required=True, help="Module signatures")
 @click.option("--inputs", "-i", multiple=True, help="Inputs as KEY=VALUE")
 @click.option("--lm", help="LM model to use")
-def run_parallel(modules: tuple[str, ...], inputs: tuple[str, ...], lm: str | None):
+@click.option(
+    "--timeout",
+    type=int,
+    default=120,
+    show_default=True,
+    help="Per-module timeout in seconds",
+)
+@click.option(
+    "--straggler-limit",
+    type=int,
+    default=3,
+    show_default=True,
+    help="Abort a module after this many consecutive timeouts",
+)
+def run_parallel(
+    modules: tuple[str, ...],
+    inputs: tuple[str, ...],
+    lm: str | None,
+    timeout: int,
+    straggler_limit: int,
+):
     """Run multiple modules in parallel."""
     section(" Parallel ")
     _show_inputs(_parse_inputs(inputs))
@@ -879,7 +1043,11 @@ def run_parallel(modules: tuple[str, ...], inputs: tuple[str, ...], lm: str | No
             mod = dspy.ChainOfThought(sig)
             ex = dspy.Example(**kwargs).with_inputs(*kwargs.keys())
             exec_pairs.append((mod, ex))
-        parallel = dspy.Parallel(num_threads=len(modules))
+        parallel = dspy.Parallel(
+            num_threads=len(modules),
+            timeout=timeout,
+            straggler_limit=straggler_limit,
+        )
         result = parallel(exec_pairs)
 
     _show_result(result, title="Parallel Results")

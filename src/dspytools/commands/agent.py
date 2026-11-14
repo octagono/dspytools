@@ -195,7 +195,10 @@ def agent_list():
     "--agent-type",
     type=click.Choice(["react", "react-v2"]),
     default="react",
-    help="Agent loop: react (v1 text parsing, small-model safe) or react-v2 (native tool calling)",
+    help=(
+        "Agent loop; both values build dspy.ReAct (DSPy 3.5: ReAct IS the "
+        "structured loop). 'react-v2' is kept as a legacy alias."
+    ),
 )
 def agent_run(
     name: str,
@@ -259,27 +262,23 @@ def agent_run(
     from dspytools.core._dspy import dspy
 
     max_iters = min(max_iters, config.get("max_iters", 10))
+    # DSPy 3.5: dspy.ReAct IS the structured loop (typed `submit` tool, History,
+    # termination_reason). dspy.ReActV2 is just a deprecated alias of it, so both
+    # --agent-type values build the same module.
     if agent_type == "react-v2":
-        # ReActV2: native tool calling via dspy.ToolCalls/History. Requires a
-        # model that emits structured function calls (Qwen 7B cannot reliably).
-        agent = dspy.ReActV2("question -> answer", tools=selected, max_iters=max_iters)
-    else:
-        # ReAct v1 — text-based parsing (Thought/Action/Observation) that
-        # works reliably with small models (Qwen 7B). ReActV2 requires native
-        # function calling (BAML/JSON schema) which Qwen 7B can't produce.
-        agent = dspy.ReAct("question -> answer", tools=selected, max_iters=max_iters)
+        click.echo("  Note: --agent-type react-v2 is an alias of react in DSPy 3.5")
+    agent = dspy.ReAct("question -> answer", tools=selected, max_iters=max_iters)
 
     click.echo("  Running agent...")
     result = agent(question=question)
-    if getattr(result, "answer", None) is None and hasattr(
-        result, "termination_reason"
-    ):
-        click.echo(
-            f"\n  Agent terminated without an answer: {result.termination_reason}"
-        )
+    answer = getattr(result, "answer", None)
+    termination = getattr(result, "termination_reason", "unknown")
+    turns = len(getattr(getattr(result, "history", None), "messages", None) or [])
+    if answer is None or answer == "":
+        click.echo(f"\n  Agent terminated without an answer: {termination}")
     else:
-        answer = getattr(result, "answer", str(result))
         click.echo(f"\n  Answer: {answer}")
+    click.echo(f"  Termination: {termination}   Turns: {turns}")
 
 
 @agent_cmd.command(name="delete", cls=LLMCommand)

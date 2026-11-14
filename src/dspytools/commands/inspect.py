@@ -81,12 +81,15 @@ def inspect_history_detail(n: int):
 
 @inspect_cmd.command(name="experimental", cls=LLMCommand)
 def inspect_experimental():
-    """Show DSPy experimental features (Citations, Document)."""
+    """Show advanced DSPy modules (dspy.experimental was removed in 3.5)."""
     panel(
-        "DSPy Experimental",
-        "[bold]Available:[/]\n"
-        "  • dspy.experimental.Citations — Citation tracking\n"
-        "  • dspy.experimental.Document — Document handling\n",
+        "DSPy Advanced Modules",
+        "[bold]Graduated to the dspy top level:[/]\n"
+        "  • dspy.RLM — recursive LM, replaces CodeAct/ProgramOfThought\n"
+        "  • dspy.Flex — optimizable module code\n"
+        "  • dspy.InterpreterPool — prewarmed sandbox interpreters\n"
+        "  • dspy.Parallel — timeout / straggler_limit options\n"
+        "  • dspy.BestOfN, dspy.Refine — sampling wrappers\n",
         border_style="cyan",
     )
 

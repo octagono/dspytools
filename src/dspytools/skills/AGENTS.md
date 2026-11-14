@@ -59,7 +59,7 @@ The skills directory implements the Agent Skills system — a BM25-indexed libra
   - Tokens extracted via regex `[a-zA-Z0-9_-]+` (lowercased)
   - Returns top-k scoring skills; returns all skills (up to k) if no query tokens
 - `SkillLoader.search_embeddings(query, k=5)` → `list[Skill]`
-  - BGE embedding-based semantic search via `LMRegistry.get(model="openai/embeddinggemma")`
+  - BGE embedding-based semantic search via `dspy.Embedder(**embedder_kwargs())` (not `LMRegistry` — embeddings are not chat LMs)
   - Falls back to BM25 search if embedder unavailable
   - Hybrid scoring: embedding cosine similarity + BM25 rank bonus (`0.3 / (rank + 1)`)
   - Gracefully handles embedder exceptions per skill

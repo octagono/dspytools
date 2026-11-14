@@ -26,7 +26,6 @@ else:
     from dspytools.core._dspy import dspy
 
 import mlflow
-from dspy.adapters.baml_adapter import BAMLAdapter as _BAMLAdapter
 
 from dspytools.commands.compile import _OPTIMIZER_SPECS
 from dspytools.commands.evaluate import _get_metric, _load_program
@@ -1871,15 +1870,27 @@ def tool_agent_run(question: str, tools: str = "[]") -> str:
                 dspy.Tool(handler, name=name, desc=BUILTIN_TOOLS[name]["description"])
             )
 
-    adapter = _BAMLAdapter(
+    # BAMLAdapter is not exported at the dspy top level — import it lazily so
+    # the adapter chain stays out of every MCP server start.
+    from dspy.adapters.baml_adapter import BAMLAdapter
+
+    adapter = BAMLAdapter(
         use_native_function_calling=False,
     )
-    # Use ReAct v1 — text-based parsing works with small models (Qwen 7B).
-    # ReActV2 requires native function calling which Qwen 7B can't produce.
+    # DSPy 3.5: dspy.ReAct is the structured agent loop (typed `submit` tool,
+    # History trace, termination_reason); ReActV2 is a deprecated alias of it.
     agent = dspy.ReAct("question -> answer", tools=dspy_tools, max_iters=8)
     with dspy.context(adapter=adapter):
         result = agent(question=question)
-    return json.dumps({"answer": getattr(result, "answer", str(result))[:500]})
+    return json.dumps(
+        {
+            "answer": getattr(result, "answer", str(result))[:500],
+            "termination_reason": getattr(result, "termination_reason", "unknown"),
+            "turns": len(
+                getattr(getattr(result, "history", None), "messages", None) or []
+            ),
+        }
+    )
 
 
 def tool_lora_list_adapters() -> str:

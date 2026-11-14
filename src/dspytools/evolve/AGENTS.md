@@ -55,7 +55,7 @@ This doc owns all files in `src/dspytools/evolve/` including the `layers/` subdi
   - `list_optimizers()` → JSON array of optimizer names
   - `evaluate(content)` → JSON `{score}` via `auto_metric`
   - `compile_decision(program_id, score, threshold=0.5)` → JSON with `{needs_compile, action}`
-- `ask(question) → dict` — runs agent, auto-evaluates quality, appends to `_quality_history`. `needs_optimization` is `True` when `score < 0.4`.
+- `ask(question) → dict` — runs agent, auto-evaluates quality, appends to `_quality_history`. Returns `{answer, score, active_program, needs_optimization, termination_reason, turns}`; each `_quality_history` entry records `termination_reason` and `turns`. `needs_optimization` is `True` when `score < 0.4`.
 - `evolve() → dict` — computes average of last 10 quality samples. `should_recompile` is `True` when `avg_score < 0.5`.
 - `status → dict` — returns `{programs_loaded, active_program, quality_samples, average_score}`.
 - `_quality_history: list[dict]` — in-memory only (not persisted).

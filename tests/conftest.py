@@ -8,8 +8,10 @@ Prevents test runs from trampling production compiled/index.json.
 from __future__ import annotations
 
 import os
+import socket
 from pathlib import Path
 from typing import Generator
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -218,69 +220,79 @@ def mock_graph(mock_redis: tuple):
             }
 
 
-# ── vcrpy hermetic-LLM infrastructure ──────────────────────────────────────
+# ── Hermetic LM fixtures ───────────────────────────────────────────────────
 #
-# Recorded-LM testing: the @pytest.mark.vcr marker records real LLM HTTP calls
-# to YAML cassettes on first run (VCR_RECORD=1 or missing cassette), then
-# replays them on subsequent runs — deterministic behavior tests with zero
-# live-LM cost in CI.
-#
-# Recording requires a live LM. Point DSPYTOOLS_TEST_LM_URL at any OpenAI-
-# compatible endpoint (default: local llama-cpp on :8080). See
-# tests/test_optimizer_behavior.py for a worked example.
+# DSPy 3.5's lm15 engine speaks HTTP through bundled stdlib raw-socket
+# transports (``dspy/_vendor/lm15/transports/_http11.py``), which vcrpy cannot
+# hook.  Recorded cassettes are dead infrastructure for this stack and were
+# removed, so tests use ``dspy.utils.DummyLM`` or a stub
+# ``complete(Request) -> Response`` engine (``dspy.LM(..., engine=...)``).
+# ``probe_lm_endpoint()`` is the only liveness check, and nothing here probes
+# or connects unless a test explicitly asks for it.
+
+
+def probe_lm_endpoint(url: str | None = None, timeout: float = 0.25) -> bool:
+    """Whether the configured OpenAI-compatible endpoint accepts a TCP connection.
+
+    Fast and local: one ``socket.create_connection`` with a 0.25s timeout
+    against ``DSPYTOOLS_TEST_LM_URL`` (default local llama-cpp on :8080).
+    Never raises and never hangs — a closed port, bad URL or DNS failure is
+    simply ``False``.
+    """
+    target = url or os.environ.get("DSPYTOOLS_TEST_LM_URL", "http://127.0.0.1:8080/v1")
+    try:
+        parts = urlsplit(target)
+        if not parts.hostname:
+            return False
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        with socket.create_connection((parts.hostname, port), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
 
 
 @pytest.fixture
-def vcr(vcr_instance):
-    """Return the configured VCR instance for manual use_cassette blocks."""
-    return vcr_instance
+def dummy_lm():
+    """Factory for a hermetic scripted LM — ``dspy.utils.DummyLM``.
 
-
-@pytest.fixture(scope="session")
-def vcr_instance():
-    """Configure a VCR instance that records/replays dspy LM HTTP calls."""
-    import vcr
-
-    cassette_dir = os.path.join(os.path.dirname(__file__), "cassettes")
-    os.makedirs(cassette_dir, exist_ok=True)
-    record_mode = "once"  # record if missing; replay if present
-    if os.environ.get("VCR_RECORD", "0") == "1":
-        record_mode = "all"
-
-    return vcr.VCR(
-        serializer="yaml",
-        cassette_library_dir=cassette_dir,
-        record_mode=record_mode,
-        match_on=["method", "scheme", "host", "port", "path", "query", "body"],
-        # Never record/leak the API key; strip volatile headers.
-        filter_headers=["authorization", "x-api-key", "user-agent"],
-        filter_post_data_parameters=["api_key"],
-        before_record_request=lambda r: r,
-    )
-
-
-@pytest.fixture
-def student_lm():
-    """A dspy.LM pointed at the local student model (or overridable endpoint).
-
-    Returns None when no local LM is reachable — tests that require a live LM
-    should ``pytest.skip`` on None so the suite still passes headless.
+    ``DummyLM(answers)`` accepts a list (consumed in order) or a dict keyed by
+    text expected in the final prompt message.  Zero network, zero cost.
     """
     from dspytools.core._dspy import dspy
 
-    base = os.environ.get("DSPYTOOLS_TEST_LM_URL", "http://127.0.0.1:8080/v1")
-    model = os.environ.get("DSPYTOOLS_TEST_LM_MODEL", "unsloth/Qwen3.5-9B-GGUF")
-    try:
-        lm = dspy.LM(
-            f"openai/{model}",
-            api_base=base,
-            api_key=os.environ.get("DSPYTOOLS_TEST_LM_KEY", "not-needed"),
-            cache=False,
-            temperature=0.0,
-            # Qwen3.5-9B fills reasoning_content before the answer field, so
-            # a small budget truncates before the output field is emitted.
-            max_tokens=4096,
-        )
-        return lm
-    except Exception:
+    return dspy.utils.DummyLM
+
+
+@pytest.fixture
+def student_lm(dummy_lm):
+    """Hermetic stand-in for the old live llama.cpp student LM.
+
+    Kept under the historical name so existing call sites keep working; it is a
+    ``DummyLM`` now (DSPy 3.5 made cassette replay impossible).
+    """
+    return dummy_lm([{"answer": "4"}])
+
+
+@pytest.fixture
+def live_lm():
+    """Opt-in live LM for manual debugging. ``None`` on every normal run.
+
+    Two gates: ``DSPYTOOLS_LIVE_LM=1`` must be set AND the configured endpoint
+    must accept a TCP connection (0.25s probe).  Nothing is constructed and
+    nothing is contacted otherwise, so the suite stays hermetic.
+    """
+    if os.environ.get("DSPYTOOLS_LIVE_LM") != "1":
         return None
+    if not probe_lm_endpoint():
+        return None
+
+    from dspytools.core._dspy import dspy
+
+    return dspy.LM(
+        f"openai/{os.environ.get('DSPYTOOLS_TEST_LM_MODEL', 'unsloth/Qwen3.5-9B-GGUF')}",
+        api_base=os.environ.get("DSPYTOOLS_TEST_LM_URL", "http://127.0.0.1:8080/v1"),
+        api_key=os.environ.get("DSPYTOOLS_TEST_LM_KEY", "not-needed"),
+        cache=False,
+        temperature=0.0,
+        max_tokens=4096,
+    )

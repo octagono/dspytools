@@ -192,7 +192,8 @@ class GitRepoExplorer(dspy.Module):
         super().__init__()
         self.mcp_tools = mcp_tools
 
-        # ReAct v1 — text-based parsing for small model compatibility (Qwen 7B)
+        # dspy.ReAct — the structured agent loop on DSPy 3.5 (typed `submit`
+        # tool, History trace, termination_reason).
         self.explorer = dspy.ReAct(
             "repo_path, question -> answer",
             tools=mcp_tools,
@@ -220,7 +221,17 @@ class GitRepoExplorer(dspy.Module):
         exploration_results = []
         for question in exploration_questions[:3]:
             result = self.explorer(repo_path=str(repo_path), question=question)
-            exploration_results.append(f"Q: {question}\nA: {result.answer}")
+            # dspy.ReAct (3.5) guarantees the declared outputs; termination_reason
+            # distinguishes a model submit from the forced final submit.
+            answer = getattr(result, "answer", None) or ""
+            termination = getattr(result, "termination_reason", "unknown")
+            exploration_results.append(f"Q: {question}\nA: {answer}")
+            if termination != "submit":
+                get_logger(__name__).warning(
+                    "explorer_react_forced_termination",
+                    question=question,
+                    termination_reason=termination,
+                )
 
         exploration_summary = "\n\n".join(exploration_results)
 

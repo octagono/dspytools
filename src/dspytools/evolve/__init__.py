@@ -185,7 +185,10 @@ class SelfEvolve:
         from dspytools.core.output import create_run_dir, save_program
         from dspytools.core.registry import register_run_with_graph
 
-        # Determine module_type from the compiled program's class
+        # Determine module_type from the compiled program's class.
+        # DSPy 3.5: dspy.ReAct is the structured agent loop and dspy.ReActV2 is
+        # a deprecated subclass alias of it, so both persist as "react". Flex is
+        # checked first because it is a Parameter wrapper, not a ReAct.
         if isinstance(program, dspy.Flex):
             module_type = "flex"
         elif isinstance(program, dspy.ReAct):

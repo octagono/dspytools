@@ -39,7 +39,7 @@ This doc owns all files directly in `src/dspytools/core/` and their contracts. T
 | `errors.py` | Typed exception hierarchy |
 | `logging_config.py` | Centralized structured logging via structlog — `get_logger(__name__)` is the standard logger accessor for all dspytools modules |
 
-- `_LazyDSPy` defers the `import dspy` (which triggers the LiteLLM import chain costing 300ms+) until the first attribute access.
+- `_LazyDSPy` defers `import dspy` (adapter + engine stack, hundreds of ms on a cold process) until the first attribute access.
 - **This is the SOLE import path for dspy across all dspytools modules.** All other modules must use:
   ```python
   from dspytools.core._dspy import dspy
@@ -64,14 +64,16 @@ This doc owns all files directly in `src/dspytools/core/` and their contracts. T
 ### `setup.py` — LMRegistry singleton + DSPy configuration
 
 - `LMRegistry` is a **class-level singleton** via `_instances: dict[str, dspy.LM]` and `_default: dspy.LM | None`.
-- LM instances are keyed by `"{model}|{api_base}"` — sharing instances ensures DSPy's built-in LM cache (`cache=True`) hits across modules.
+- LM instances are keyed by `_lm_cache_key(model, lm_kw)` — the model plus **every output-affecting kwarg** (`temperature`, `max_tokens`, `reasoning_effort`, `model_type`, …); `api_key` is deliberately excluded. Sharing instances ensures DSPy's built-in LM cache (`cache=True`) hits across modules; differing thinking/temperature configs must never collide on one cached LM.
+- Every LM is built with `model_type="chat"` by default (config `dspy.model_type`, per-section `model_type` override) — llama.cpp serves only `/v1/chat/completions` while 3.5's `"auto"` routes to `/v1/responses`. Embedding models are exempt: `LMRegistry` is for chat/completion LMs, embeddings go through `dspy.Embedder`.
+- Thinking is controlled by `reasoning_effort`, never `chat_template_kwargs` (3.5 rejects the latter on the canonical Request path). `_reasoning_kwargs()` maps `enable_thinking: false` → `"none"`, `true`/absent → omit the dial; an explicit `reasoning_effort` in config wins.
 - `LMRegistry.get_or_default()` — prefers the student model from `config["lm"]["student"]`. Falls back to `config["lm"]["default"]`, then to `openai/gpt-4o` with `cache=False`.
 - `LMRegistry.get_teacher()` — returns the teacher LM from `config["lm"]["teacher"]`. **MUST NEVER be used for inference.** Only for GEPA/distill/finetune optimization paths.
 - `LMRegistry.clear()` — resets all cached instances (used in tests).
 - `setup_dspy()` — calls `dspy.configure(lm=...)` with an LM from the registry. Auto-resolves `api_base` from the configured student model or registry entries when not explicitly provided. Reads `.env` for API keys. Call once at startup.
   - **Adapter**: reads `cfg["dspy"]["adapter"]` from config (set via `dspytools configure adapter set`). Defaults to `BAMLAdapter(use_native_function_calling=False)`. Supports `"baml"`, `"chat"`, `"json"`, `"xml"` types. Only the selected adapter is constructed (not all four); unknown/stale config values fall back to `BAMLAdapter`.
   - **Reasoning patch**: always patched into `baml_adapter._render_type_str` — renders `dspy.Reasoning` as plain `"string"` instead of expanding the Pydantic schema (prevents Qwen 7B outputting `"reasoning"` key instead of `"next_thought"`).
-  - **Parse patch**: `JSONAdapter.parse`/`BAMLAdapter.parse` are replaced with a reasoning-tolerant parse. It first tries strict JSON (json_repair + `{...}` regex), then falls back to ChatAdapter-style `[[ ## field ## ]]` section parsing — small local models (Qwen) echo the BAML template back verbatim instead of emitting JSON. After the `parse_value` cast it applies DSPy 3.3.1's `apply_output_field_defaults` (so omitted defaulted/nullable output fields are filled, matching stock JSONAdapter behavior) and only then enforces presence of required (non-Reasoning) output fields; missing `dspy.Reasoning` fields are tolerated (filled from `reasoning_content` in `_call_postprocess`). **Version-compat**: `apply_output_field_defaults` is imported with feature-detection (try/except ImportError) so a future DSPy that moves/renames the helper degrades to skip-default-filling rather than hard-crashing setup — this is a symbol-level compat guard on a hard dependency, the sole exception to Golden Rule 4's no-guarded-imports.
+  - **Parse patch**: `JSONAdapter.parse`/`BAMLAdapter.parse` are replaced with a reasoning-tolerant parse. It first tries strict JSON (json_repair + `{...}` regex), then falls back to ChatAdapter-style `[[ ## field ## ]]` section parsing — small local models (Qwen) echo the BAML template back verbatim instead of emitting JSON. After the `parse_value` cast it applies DSPy 3.5's `apply_output_field_defaults` (so omitted defaulted/nullable output fields are filled, matching stock JSONAdapter behavior) and only then enforces presence of required (non-Reasoning) output fields; missing `dspy.Reasoning` fields are tolerated (filled from `reasoning_content` in `_call_postprocess`). **Version-compat**: `apply_output_field_defaults` is imported with feature-detection (try/except ImportError) so a future DSPy that moves/renames the helper degrades to skip-default-filling rather than hard-crashing setup — this is a symbol-level compat guard on a hard dependency, the sole exception to Golden Rule 4's no-guarded-imports.
 
 ### `hotswap.py` — LRU-cached program hot-swap
 

@@ -77,10 +77,9 @@ class TestPipelineForward:
         """forward() returns a dspy.Prediction with 'output' field."""
         from dspytools.core._dspy import dspy
 
-        # DSPy is already configured by the test suite (no-op on re-entry).
-        from dspytools.core.setup import setup_dspy
-
-        setup_dspy()
+        # Hermetic: a scripted LM instead of setup_dspy(), whose fallback
+        # ``openai/gpt-4o`` LM would attempt a real API call.
+        lm = dspy.utils.DummyLM({"test query": {"output": "stub output"}})
 
         class Pipeline(dspy.Module):
             def __init__(self):
@@ -92,8 +91,10 @@ class TestPipelineForward:
                 return dspy.Prediction(output=getattr(result, "output", str(result)))
 
         p = Pipeline()
-        result = p(input="test query")
+        with dspy.context(lm=lm, adapter=dspy.ChatAdapter()):
+            result = p(input="test query")
         assert hasattr(result, "output")
+        assert result.output == "stub output"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -10,7 +10,7 @@
 | `.pre-commit-config.yaml` | Exists — ruff + ruff-format |
 | `pyproject.toml` | setuptools backend, no native binary packaging |
 | `mojo_modules/build.sh` | Exists — compiles `.mojo` → `.so` via `mojo build` |
-| Test suite | 359 tests across 23 files, ~5s, zero LLM deps |
+| Test suite | 369 hermetic tests across 25 files, ~5s, zero LLM deps |
 | Golden eval datasets | `data/qa_train.json` (15 ex), `data/dev_qa.json`, `data/project_analysis_train.json` |
 
 ## Architecture
@@ -20,7 +20,7 @@ PR/push ──► Stage 1: ci.yml ───────────────�
   (lint + smoke tests, 60s, free runner)                                   │
                                                                            ▼
 merge to main ──► Stage 2: integration.yml ────────────────────────────────┐
-  (FalkorDB container + vcrpy LLM cassettes, 3min, free runner)            │
+  (FalkorDB container + hermetic DummyLM suite, 3min, free runner)            │
                                                                            ▼
 tag v*.*.* ──► Stage 3: release.yml ──────────────────────────────────────┐
   (Mojo native wheel matrix: linux/macos, 5min, free runners)             │
@@ -75,7 +75,7 @@ smoke-tests:
     - run: python -c "from dspytools.core._dspy import dspy; from dspytools.gfl.pipeline import GFLPipeline; from dspytools.mcp.tools import BUILTIN_TOOLS; print(f'{len(BUILTIN_TOOLS)} MCP tools')"
 ```
 
-**Rationale:** 359 tests run in ~5s with zero LLM dependencies (conftest isolates all paths). The import check mirrors `verify.sh` and catches dependency breakage early.
+**Rationale:** 369 tests run in ~5s with zero LLM dependencies (conftest isolates all paths). The import check mirrors `verify.sh` and catches dependency breakage early.
 
 ### Files to create
 - `.github/workflows/ci.yml`
@@ -128,16 +128,16 @@ llm-mock-integration:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
       with: { python-version: "3.12" }
-    - run: pip install -e ".[dev]" vcrpy
+    - run: pip install -e ".[dev]"
     - run: pytest tests/ -k "not graph and not memory and not cache and not skill_graph" -v --tb=short
-    # Record cassettes on first run, replay on subsequent
+    # Every LLM-touching test uses dspy.utils.DummyLM or a stub Request/Response engine.
     - run: python -c "
-        import vcrpy;
-        # Verify cassette infrastructure
-        print('vcrpy available for LLM mock cassettes')"
+        import dspy, dspy.utils
+        # Verify the offline LM test double is available
+        print('DummyLM available for hermetic LLM tests:', dspy.utils.DummyLM)"
 ```
 
-**Rationale:** The non-FalkorDB tests already run without an LLM (conftest mocks Redis). For future LLM-dependent tests, `vcrpy` records real LLM HTTP calls once into `tests/cassettes/` YAML files, then replays them on subsequent runs — zero API cost, deterministic.
+**Rationale:** The non-FalkorDB tests already run without an LLM (conftest mocks Redis). DSPy-touching tests must not reach the network at all: DSPy 3.5's bundled `lm15` engine writes through raw-socket transports that vcrpy cannot intercept, so recording cassettes is not an option — the suite uses `dspy.utils.DummyLM` or a stub `complete(Request) -> Response` engine instead. `DSPYTOOLS_LIVE_LM=1` opts into the real local llama.cpp lane when you want it.
 
 #### 2c. graph-migration
 ```yaml
@@ -509,11 +509,11 @@ promote-programs:
 Week 1: Foundation
 ├── 1. .github/workflows/ci.yml (Stage 1a + 1b)
 ├── 2. Verify ruff format --check passes (fix formatting drift)
-└── 3. Verify all 359 tests pass on ubuntu-latest
+└── 3. Verify all 369 tests pass on ubuntu-latest
 
 Week 2: Integration
 ├── 4. .github/workflows/integration.yml (Stage 2a + 2c)
-├── 5. Add vcrpy to dev dependencies (Stage 2b prep)
+├── 5. Verify the hermetic DummyLM suite replaces any recorded-cassette approach
 └── 6. Verify FalkorDB service container works in CI
 
 Week 3: Evaluation
@@ -586,7 +586,7 @@ Stage 1 + 2 require **zero secrets** — they run entirely on free runners with 
 |----------|-----------|
 | `ruff format --check` in CI (not just pre-commit) | Pre-commit only runs locally. CI catches contributors who skip `pre-commit install`. |
 | `pyright` on `core/` + `config/` only | Full-repo pyright is slow and noisy. Start with the highest-value typed modules. |
-| vcrpy for LLM mocking (not a live mock server) | Zero-infrastructure: cassettes are YAML files committed to the repo. Record once, replay forever. |
+| Hermetic `DummyLM` tests (not vcrpy cassettes) | DSPy 3.5's `lm15` engine bypasses HTTP client hooks via bundled raw-socket transports, so vcrpy cannot intercept it. DummyLM needs no infrastructure and cannot drift. |
 | `hatchling` over `scikit-build-core` | Hatch is simpler for pure-Python + binary inclusion. scikit-build is CMake-oriented overkill. |
 | Self-hosted GPU runner (your machine) | Zero cloud cost. Model already warm. MLflow + FalkorDB + Redis already running. Self-hosted runner is a 2-minute setup daemon. |
 | Golden dataset = 50 examples | Large enough for statistical significance (SPRT needs ~12-20 for 95% confidence), small enough for 30min nightly run on local 7B model. |

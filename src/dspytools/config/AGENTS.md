@@ -47,7 +47,7 @@ Owns two source files:
   - `adapters_dir()` — `~/.config/dspytools/adapters/`
   - `mlflow_tracking_uri()` — `os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000")`
   - `mlflow_experiment_name()` — `os.environ.get("MLFLOW_EXPERIMENT_NAME", "dspytools")`
-  - `embedder_kwargs()` — returns `{model, api_base, api_key}` dict for `dspy.Embedder` (SSOT)
+  - `embedder_kwargs()` — returns `{model, api_base, api_key}` dict for `dspy.Embedder` (SSOT). DSPy 3.5's Embedder goes through the OpenAI SDK for hosted endpoints: only `openai/` and `azure/` prefixes are accepted (`llama_cpp/x` is rewritten to `openai/x`), and `api_base` reaches the SDK as `base_url`.
   - `embedder_dimension()` — reads `DSPYTOOLS_EMBEDDING_DIM` env var, returns int (default 768 for embeddinggemma)
 
 - **Settings schema** (TOML keys):

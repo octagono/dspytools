@@ -5,12 +5,12 @@
 **24 command groups · 166 subcommands · 102 source files · 17+ optimizers · 11 arXiv paper implementations**
 
 ![Python](https://img.shields.io/badge/python-3.12+-blue)
-![DSPy](https://img.shields.io/badge/dspy-3.3.1-green)
+![DSPy](https://img.shields.io/badge/dspy-3.5.0-green)
 ![MLflow](https://img.shields.io/badge/mlflow-integrated-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Ruff](https://img.shields.io/badge/ruff-zero--errors-brightgreen)
 ![Pyright](https://img.shields.io/badge/pyright-zero--errors-brightgreen)
-![Tests](https://img.shields.io/badge/tests-363-pass-brightgreen)
+![Tests](https://img.shields.io/badge/tests-369-pass-brightgreen)
 
 A production-grade, self-evolving CLI for DSPy program management — featuring hot-swap inference,
 MCP agent interoperability, a Generative Feedback Loop (GFL) pipeline, skills system,
@@ -18,7 +18,7 @@ llms.txt generation, and full MLflow experiment tracking.
 
 **All subsystems integrated via SSOT (Single Source of Truth) pattern with fail-fast imports.**
 
-Built on **DSPy 3.3.1**, runs on **Qwen3.5-9B** (student+teacher inference via llama-cpp-server),
+Built on **DSPy 3.5.0** (bundled `lm15` engine — no LiteLLM), runs on **Qwen3.5-9B** (student+teacher inference via llama-cpp-server),
 with **DeepSeek V4 Flash** as an optional teacher LM for heavy optimization.
 
 ---
@@ -131,7 +131,7 @@ graph TD
 | `module` | 5 | Create, list, call, show, delete DSPy modules |
 | `run`   | 16 | 13 inference strategies + list + retrieve + knn |
 | `compile` | 23 | 21 optimizers + submit/status/list/cancel |
-| `agent`  | 4 | New, list, run, delete ReActV2 agents |
+| `agent`  | 4 | New, list, run, delete ReAct agents |
 | `tool`  | 6 | List, show, from-mcp, inspect, python-interpreter, history |
 | `evaluate`| 2 | Run evaluation, list available metrics |
 | `data`  | 3 | List, load, preview datasets |
@@ -276,7 +276,7 @@ Compatible with **OpenCode**, **Claude Desktop**, **Codex**, and any MCP client.
 
 - **RepositoryAnalyzer** (5-stage pipeline) — analyzes repo structure, reads README, explores packages, generates documentation
 - **Batch evaluation** — quality metrics against ground truth examples
-- **MCP git exploration** — deep repo analysis via ReActV2 agent with git-mcp tools
+- **MCP git exploration** — deep repo analysis via ReAct agent with git-mcp tools
 - **BAML adapter support** — optional BAML integration
 
 ### Self-Optimizing `--help`
@@ -493,15 +493,16 @@ dspytools module delete <name>         # Delete module
 ```bash
 dspytools run predict <signature> -i <key>=<val>  # Standard prediction
 dspytools run cot <signature> -i <key>=<val>     # Chain-of-thought
-dspytools run react <signature> -i <key>=<val>    # ReAct agent
-dspytools run react-v2 <signature> -i <key>=<val>  # ReActV2 agent
+dspytools run react <signature> -i <key>=<val>    # ReAct agent (structured history + typed submit)
+dspytools run react-v2 <signature> -i <key>=<val>  # Legacy alias — now identical to `run react`
 dspytools run pot <signature> -i <key>=<val>     # Program-of-Thought style (RLM-backed)
 dspytools run code-act <signature> -i <key>=<val>  # CodeAct style (RLM-backed with tools)
-dspytools run rlm <signature> -i <key>=<val>     # Recursive Language Model
+dspytools run rlm <signature> -i <key>=<val>     # Recursive Language Model (--resume-history <path>)
+dspytools run flex <signature> -i <key>=<val>     # Sandboxed Flex program (--interpreter-pool-size N)
 dspytools run best-of-n <signature> -i <key>=<val>  # Best-of-N sampling
 dspytools run refine <signature> -i <key>=<val>   # Progressive refinement
 dspytools run multi-chain <signature> -i <key>=<val> # Multi-chain reasoning
-dspytools run parallel <signature> -i <key>=<val>  # Parallel execution
+dspytools run parallel <signature> -i <key>=<val>  # Parallel execution (--timeout, --straggler-limit)
 dspytools run retrieve <signature> -i <key>=<val>  # Retrieval-augmented
 dspytools run list                  # List available run types
 ```
@@ -549,7 +550,7 @@ dspytools compile cancel <job-id>
 ### Agents (`agent`)
 
 ```bash
-dspytools agent new <name> <signature>     # Create ReActV2 agent
+dspytools agent new <name> <signature>     # Create ReAct agent
 dspytools agent list              # List agents
 dspytools agent run <name>           # Run agent
 dspytools agent delete <name>          # Delete agent
@@ -800,7 +801,7 @@ dspytools/
 │  ├── api/ (1)        ← FastAPI hot-swap server
 │  ├── config/ (2)       ← Config: settings (hot-reload, env var overrides), env
 │  └── cli/ (3)        ← Rich output utilities (llm_help, output, rich_config)
-├── tests/ (25 files)      ← 363 tests (incl. recorded-LM behavior tests, zero live-LLM dependency)
+├── tests/ (25 files)      ← 369 hermetic tests (DummyLM only, zero live-LLM dependency)
 ├── docker-compose.redis.yml  ← Redis Stack + FalkorDB container
 ├── AGENTS.md          ← DOX framework root
 ├── pyproject.toml       ← UV project + pyright + pytest config

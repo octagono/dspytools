@@ -24,6 +24,7 @@ Explicit (special):
 
 from __future__ import annotations
 
+import inspect
 import json
 from typing import Any, Callable
 
@@ -59,36 +60,252 @@ from dspytools.gfl.pipeline import GFLPipeline
 
 _log = get_logger(__name__)
 
-# Keys that dspy.GEPA.__init__ rejects in 3.3.1+ (ValueError at construction).
-# Previously silently ignored; now a hard fail — surface it as a clear CLI error.
-_GEPA_UNSUPPORTED_KWARGS = frozenset(
-    {"max_reflection_cost", "reflection_prompt_template"}
+# ── GEPA kwargs plumbing ────────────────────────────────────────────────
+# The knob lists below are derived from the *installed* DSPy signature instead
+# of being pinned to one DSPy version, so `dspytools compile` accepts every
+# kwarg the running dspy.GEPA understands and keeps working across upgrades.
+
+# Knobs promoted to first-class CLI options (only forwarded when they differ
+# from dspy.GEPA's own defaults, so the CLI defaults stay behaviour-neutral).
+_GEPA_KNOB_NAMES = (
+    "seed",
+    "use_merge",
+    "component_selector",
+    "perfect_score",
+    "track_stats",
+    "track_best_outputs",
 )
+
+# gepa.optimize kwargs that dspy.GEPA passes explicitly itself (a duplicate
+# would be a TypeError) — route them through --gepa-kwarg / named options.
+_GEPA_DSPY_OWNED_OPTIMIZE_KWARGS = frozenset(
+    {
+        "seed_candidate",
+        "trainset",
+        "valset",
+        "adapter",
+        "reflection_lm",
+        "candidate_selection_strategy",
+        "skip_perfect_score",
+        "reflection_minibatch_size",
+        "module_selector",
+        "perfect_score",
+        "use_merge",
+        "max_merge_invocations",
+        "max_metric_calls",
+        "logger",
+        "run_dir",
+        "use_wandb",
+        "wandb_api_key",
+        "wandb_init_kwargs",
+        "use_mlflow",
+        "track_best_outputs",
+        "display_progress_bar",
+        "raise_on_exception",
+        "seed",
+    }
+)
+
+# kwargs dspy.GEPA's constructor rejects outright, and why.
+_GEPA_UNUSABLE_OPTIMIZE_KWARGS = {
+    "max_reflection_cost": (
+        "not supported by dspy.GEPA (DSPy LMs expose no cumulative cost budget)"
+    ),
+    "reflection_prompt_template": (
+        "unused by dspy.GEPA (DspyAdapter supplies its own proposer) —"
+        " pass instruction_proposer instead"
+    ),
+}
+
+
+def _gepa_init_params() -> dict[str, inspect.Parameter]:
+    """Keyword parameters the installed ``dspy.GEPA.__init__`` accepts."""
+    params = inspect.signature(dspy.GEPA.__init__).parameters
+    return {
+        name: param
+        for name, param in params.items()
+        if name not in {"self", "metric"}
+        and param.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+
+
+def _parse_kv_tuples(pairs: tuple[str, ...]) -> dict[str, Any]:
+    """Parse ``key=value`` CLI tuples, JSON-decoding each value when possible."""
+    out: dict[str, Any] = {}
+    for kv in pairs:
+        key, _, value = kv.partition("=")
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            pass
+        out[key.strip()] = value
+    return out
 
 
 def _parse_gepa_kwargs(gepa_kwargs: tuple[str, ...]) -> dict[str, Any] | None:
-    """Parse ``--gepa-kwargs key=value`` tuples (values JSON-parsed) into a dict.
+    """Parse ``--gepa-kwargs key=value`` into ``dspy.GEPA(gepa_kwargs=...)``.
 
-    Rejects kwargs that DSPy 3.3.1's ``dspy.GEPA`` refuses at construction time
-    (``max_reflection_cost``, ``reflection_prompt_template``) with a clear CLI
-    error instead of a raw ``ValueError`` deep in the optimizer.
+    These are forwarded verbatim to ``gepa.optimize``, so keys are validated
+    against that callable's signature: unknown keys and keys dspy.GEPA already
+    supplies itself fail here with a readable CLI error instead of a TypeError
+    (or a silent duplicate) deep inside the optimizer.
     """
-    gk: dict[str, Any] = {}
-    for kv in gepa_kwargs:
-        k, _, v = kv.partition("=")
-        try:
-            v = json.loads(v)
-        except (ValueError, TypeError):
-            pass
-        gk[k.strip()] = v
-    unsupported = sorted(set(gk) & _GEPA_UNSUPPORTED_KWARGS)
-    if unsupported:
+    gk = _parse_kv_tuples(gepa_kwargs)
+    if not gk:
+        return None
+
+    from gepa import optimize as gepa_optimize
+
+    accepted = set(inspect.signature(gepa_optimize).parameters)
+    unknown = sorted(set(gk) - accepted)
+    if unknown:
         raise click.ClickException(
-            f"unsupported GEPA kwargs for DSPy 3.3.1: {', '.join(unsupported)}"
-            " (max_reflection_cost is not supported by dspy.GEPA;"
-            " reflection_prompt_template must be passed via instruction_proposer instead)"
+            f"unknown GEPA kwargs: {', '.join(unknown)}"
+            " (not accepted by gepa.optimize in the installed dspy/gepa)"
         )
-    return gk or None
+    unusable = sorted(set(gk) & set(_GEPA_UNUSABLE_OPTIMIZE_KWARGS))
+    if unusable:
+        details = "; ".join(
+            f"{name}: {_GEPA_UNUSABLE_OPTIMIZE_KWARGS[name]}" for name in unusable
+        )
+        raise click.ClickException(f"GEPA kwarg(s) unusable here — {details}")
+    owned = sorted(set(gk) & _GEPA_DSPY_OWNED_OPTIMIZE_KWARGS)
+    if owned:
+        raise click.ClickException(
+            f"GEPA kwargs supplied by dspy.GEPA itself: {', '.join(owned)}"
+            " (use the matching CLI option, e.g. --seed or --use-merge,"
+            " or pass a GEPA constructor kwarg via --gepa-kwarg)"
+        )
+    return gk
+
+
+def _parse_gepa_ctor_kwargs(gepa_kwarg: tuple[str, ...]) -> dict[str, Any]:
+    """Parse repeatable ``--gepa-kwarg key=value`` into constructor kwargs.
+
+    Escape hatch for any ``dspy.GEPA.__init__`` parameter the named CLI options
+    do not cover (e.g. ``--gepa-kwarg max_metric_calls=250``).
+    """
+    kwargs = _parse_kv_tuples(gepa_kwarg)
+    accepted = _gepa_init_params()
+    unknown = sorted(set(kwargs) - set(accepted))
+    if unknown:
+        raise click.ClickException(
+            f"unknown dspy.GEPA constructor kwargs: {', '.join(unknown)}"
+            f" (accepted: {', '.join(sorted(accepted))})"
+        )
+    return kwargs
+
+
+def _gepa_ctor_kwargs(**overrides: Any) -> dict[str, Any]:
+    """Keep only GEPA knobs whose value differs from ``dspy.GEPA``'s default.
+
+    Guarantees the CLI defaults reproduce un-flagged behaviour exactly, while
+    still forwarding any knob the user chose explicitly.
+    """
+    params = _gepa_init_params()
+    selected: dict[str, Any] = {}
+    for name, value in overrides.items():
+        if value is None:
+            continue
+        default = params[name].default
+        if default is inspect.Parameter.empty or value != default:
+            selected[name] = value
+    return selected
+
+
+def _gepa_cli_kwargs(
+    *,
+    gepa_kwarg: tuple[str, ...],
+    seed: int | None,
+    use_merge: bool,
+    component_selector: str,
+    perfect_score: float,
+    track_stats: bool,
+    track_best_outputs: bool,
+) -> dict[str, Any]:
+    """Collect GEPA constructor kwargs chosen on the command line."""
+    selected = _gepa_ctor_kwargs(
+        seed=seed,
+        use_merge=use_merge,
+        component_selector=component_selector,
+        perfect_score=perfect_score,
+        track_stats=track_stats,
+        track_best_outputs=track_best_outputs,
+    )
+    # Explicit --gepa-kwarg wins over the named options.
+    selected.update(_parse_gepa_ctor_kwargs(gepa_kwarg))
+    return selected
+
+
+def _build_gepa(metric: Any, **kwargs: Any) -> Any:
+    """Construct ``dspy.GEPA``, keeping every kwarg signature-valid.
+
+    Named CLI knobs and ``--gepa-kwarg`` values are collected, stray
+    compile-time arguments (``trainset``, ``k``, ...) are ignored, and the
+    budget selector is resolved to exactly one of ``auto`` /
+    ``max_metric_calls`` / ``max_full_evals`` as dspy requires.
+    """
+    accepted = _gepa_init_params()
+
+    ctor: dict[str, Any] = {}
+    for name in _GEPA_KNOB_NAMES:
+        if name in kwargs:
+            ctor[name] = kwargs.pop(name)
+    for name in list(kwargs):
+        if name in accepted and name != "metric":
+            ctor[name] = kwargs.pop(name)
+
+    if ctor.get("track_best_outputs"):
+        # dspy asserts track_stats whenever track_best_outputs is requested.
+        ctor.setdefault("track_stats", True)
+    if "max_metric_calls" in ctor or "max_full_evals" in ctor:
+        ctor.pop("auto", None)
+    else:
+        ctor.setdefault("auto", "light")
+
+    return dspy.GEPA(metric=metric, **ctor)
+
+
+_GEPA_KNOB_OPTIONS: dict[str, dict[str, Any]] = {
+    "--seed": {
+        "type": int,
+        "default": None,
+        "help": "GEPA RNG seed (omit to use dspy.GEPA's own default)",
+    },
+    "--use-merge/--no-use-merge": {
+        "default": True,
+        "help": "GEPA merge-based optimization (default: enabled)",
+    },
+    "--component-selector": {
+        "default": "round_robin",
+        "help": "GEPA component selector ('round_robin' or 'all')",
+    },
+    "--perfect-score": {
+        "type": float,
+        "default": 1.0,
+        "help": "Metric score GEPA treats as perfect",
+    },
+    "--track-stats/--no-track-stats": {
+        "default": False,
+        "help": "Attach GEPA detailed_results to the compiled program",
+    },
+    "--track-best-outputs/--no-track-best-outputs": {
+        "default": False,
+        "help": "Track best valset outputs (implies --track-stats)",
+    },
+    "--gepa-kwarg": {
+        "multiple": True,
+        "help": "Any dspy.GEPA constructor kwarg as key=value (values JSON-parsed)",
+    },
+}
+
+
+def _with_gepa_knobs(cmd: Callable) -> Callable:
+    """Attach the shared GEPA knob options to an explicit Click command."""
+    for opt_str, opt_kwargs in _GEPA_KNOB_OPTIONS.items():
+        cmd = click.option(opt_str, **opt_kwargs)(cmd)
+    return cmd
 
 
 # Estimated token cost per optimizer (per trainset example). Follows the
@@ -155,6 +372,13 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
         draft: bool = False,
         use_mlflow: bool = False,
         gepa_kwargs: tuple[str, ...] = (),
+        gepa_kwarg: tuple[str, ...] = (),
+        seed: int | None = None,
+        use_merge: bool = True,
+        component_selector: str = "round_robin",
+        perfect_score: float = 1.0,
+        track_stats: bool = False,
+        track_best_outputs: bool = False,
     ):
         setup_dspy()
         student = load_module_by_name(module_name)
@@ -189,10 +413,21 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
                     raise click.Abort()
                 extra_params["reflection_lm"] = teacher
 
-            # GEPA: forward --use-mlflow and parsed --gepa-kwargs
+            # GEPA: forward --use-mlflow, --gepa-kwargs and the GEPA knobs
             if name == "gepa":
                 extra_params["gepa_kwargs"] = _parse_gepa_kwargs(gepa_kwargs)
                 extra_params["use_mlflow"] = use_mlflow
+                extra_params.update(
+                    _gepa_cli_kwargs(
+                        gepa_kwarg=gepa_kwarg,
+                        seed=seed,
+                        use_merge=use_merge,
+                        component_selector=component_selector,
+                        perfect_score=perfect_score,
+                        track_stats=track_stats,
+                        track_best_outputs=track_best_outputs,
+                    )
+                )
 
             opt = cls_lambda(metric=metric, trainset=trainset, **extra_params)
             # KNNFewShot consumes trainset in __init__, not compile()
@@ -212,6 +447,9 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
             # COPRO requires eval_kwargs
             if "copro" in name:
                 compile_kwargs["eval_kwargs"] = {"num_threads": 4}
+            # BootstrapFewShotWithOptuna requires the demo cap at compile time
+            if "optuna" in name:
+                compile_kwargs["max_demos"] = 4
             # SIMBA requires at least bsize examples
             if "simba" in name and len(trainset) < opt.bsize:
                 fail(f"SIMBA needs ≥{opt.bsize} examples, got {len(trainset)}")
@@ -228,7 +466,11 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
                     f"  Retries: {retry_stats['retries']} (total delay: {retry_stats['total_delay']:.1f}s)"
                 )
 
-        # Cost tracking (approximate based on trainset size and optimizer)
+        # Cost tracking (approximate based on trainset size and optimizer).
+        # Single canonical path: one estimate → one CompileCost.add_call →
+        # TokenUsage.estimate. DSPy's Usage totals already fold cached, tool-use
+        # and reasoning/audio tokens into prompt/completion counts, so no extra
+        # counters are added here (that would double-count).
         est_tokens, _ = _estimate_optimizer_cost(name, len(trainset))
 
         cost = CompileCost(compile_id="", optimizer=name)
@@ -343,13 +585,7 @@ _OPTIMIZER_SPECS = {
     },
     "gepa": {
         "cls_name": "GEPA",
-        "cls_lambda": lambda metric, **kw: dspy.GEPA(
-            metric=metric,
-            auto=kw.pop("auto", "light"),
-            reflection_lm=kw.pop("reflection_lm", None),
-            use_mlflow=kw.pop("use_mlflow", False),
-            gepa_kwargs=kw.pop("gepa_kwargs", None),
-        ),
+        "cls_lambda": lambda metric, **kw: _build_gepa(metric, **kw),
         "params": {},
         "needs_teacher": True,
         "extra_options": {
@@ -359,8 +595,9 @@ _OPTIMIZER_SPECS = {
             },
             "--gepa-kwargs": {
                 "multiple": True,
-                "help": "Extra GEPA kwargs as key=value (values JSON-parsed)",
+                "help": "Extra kwargs for gepa.optimize as key=value (values JSON-parsed)",
             },
+            **_GEPA_KNOB_OPTIONS,
         },
     },
     "copro": {
@@ -435,13 +672,14 @@ def _register_optimizer_commands():
 @click.option(
     "--gepa-kwargs",
     multiple=True,
-    help="Extra GEPA kwargs as key=value (values JSON-parsed), e.g. --gepa-kwargs max_full_evals=3",
+    help="Extra kwargs for gepa.optimize as key=value (values JSON-parsed), e.g. --gepa-kwargs use_cloudpickle=true",
 )
 @click.option(
     "--use-mlflow/--no-use-mlflow",
     default=False,
     help="Enable MLflow tracking for GEPA optimization",
 )
+@_with_gepa_knobs
 def compile_submit(
     optimizer: str,
     module_name: str,
@@ -451,6 +689,13 @@ def compile_submit(
     k: int,
     gepa_kwargs: tuple[str, ...],
     use_mlflow: bool,
+    gepa_kwarg: tuple[str, ...] = (),
+    seed: int | None = None,
+    use_merge: bool = True,
+    component_selector: str = "round_robin",
+    perfect_score: float = 1.0,
+    track_stats: bool = False,
+    track_best_outputs: bool = False,
 ):
     """Submit a background compile job. Returns job_id for polling."""
 
@@ -504,12 +749,21 @@ def compile_submit(
 
     def _run_gepa() -> str:
         gk = _parse_gepa_kwargs(gepa_kwargs)
-        opt = dspy.GEPA(
-            metric=gepa_metric,
+        opt = _build_gepa(
+            gepa_metric,
             auto=auto,
             reflection_lm=teacher,
             use_mlflow=use_mlflow,
             gepa_kwargs=gk,
+            **_gepa_cli_kwargs(
+                gepa_kwarg=gepa_kwarg,
+                seed=seed,
+                use_merge=use_merge,
+                component_selector=component_selector,
+                perfect_score=perfect_score,
+                track_stats=track_stats,
+                track_best_outputs=track_best_outputs,
+            ),
         )
         # Split valset to avoid GEPA overfitting warning
         val_size = max(3, len(trainset) // 5) if len(trainset) >= 6 else 0
@@ -566,6 +820,7 @@ def compile_submit(
     default=False,
     help="Enable MLflow tracking for GEPA optimization",
 )
+@_with_gepa_knobs
 def compile_flex(
     module_name: str,
     trainset_path: str,
@@ -574,6 +829,13 @@ def compile_flex(
     tools: tuple[str, ...],
     max_predictor_calls: int,
     use_mlflow: bool,
+    gepa_kwarg: tuple[str, ...] = (),
+    seed: int | None = None,
+    use_merge: bool = True,
+    component_selector: str = "round_robin",
+    perfect_score: float = 1.0,
+    track_stats: bool = False,
+    track_best_outputs: bool = False,
 ):
     """Optimize a module's implementation code with dspy.Flex + GEPA.
 
@@ -617,11 +879,20 @@ def compile_flex(
         else:
             prog = dspy.Flex(sig_str, max_predictor_calls=max_predictor_calls)
 
-        opt = dspy.GEPA(
-            metric=gepa_metric_cost_aware(),
+        opt = _build_gepa(
+            gepa_metric_cost_aware(),
             auto=auto,
             reflection_lm=teacher,
             use_mlflow=use_mlflow,
+            **_gepa_cli_kwargs(
+                gepa_kwarg=gepa_kwarg,
+                seed=seed,
+                use_merge=use_merge,
+                component_selector=component_selector,
+                perfect_score=perfect_score,
+                track_stats=track_stats,
+                track_best_outputs=track_best_outputs,
+            ),
         )
         # Split valset to avoid GEPA overfitting warning
         val_size = max(3, len(trainset) // 5) if len(trainset) >= 6 else 0
@@ -762,7 +1033,7 @@ def compile_bt(module_name: str, trainset_path: str, strategy: str, label: str |
 
     bt = dspy.BetterTogether(
         metric=gepa_metric,
-        p=dspy.GEPA(metric=gepa_metric, auto="light", reflection_lm=teacher),
+        p=_build_gepa(gepa_metric, auto="light", reflection_lm=teacher),
     )
     # Split valset to avoid GEPA overfitting warning
     val_size = max(3, len(trainset) // 5) if len(trainset) >= 6 else 0
@@ -846,7 +1117,12 @@ def compile_ensemble(modules: tuple[str, ...], label: str | None):
 @compile_cmd.command(name="finetune", cls=LLMCommand)
 @click.argument("module_name")
 @click.argument("trainset_path")
-@click.option("--num-iters", default=5, type=int)
+@click.option(
+    "--num-iters",
+    default=5,
+    type=int,
+    help="Training epochs, forwarded to the provider as train_kwargs['n_epochs']",
+)
 @label_option
 def compile_finetune(
     module_name: str, trainset_path: str, num_iters: int, label: str | None
@@ -873,9 +1149,11 @@ def compile_finetune(
             )
         )
 
+    # dspy.BootstrapFinetune has no num_iters kwarg: training hyper-parameters go
+    # to the provider through train_kwargs (num_iters → n_epochs).
     opt = dspy.BootstrapFinetune(
         metric=exact_match_metric(),
-        num_iters=num_iters,
+        train_kwargs={"n_epochs": num_iters},
     )
     compiled = opt.compile(student=student, trainset=trainset)
 
@@ -1195,13 +1473,23 @@ def compile_avatar(module_name: str, trainset_path: str, label: str | None):
     student = load_module_by_name(module_name)
     trainset = load_trainset(trainset_path)
 
-    # AvatarOptimizer requires an acting agent module (ReActV2 with tools)
+    # dspy.AvatarOptimizer builds its comparator with dspy.TypedPredictor, which
+    # current DSPy releases no longer ship. Fail here with an actionable message
+    # instead of an AttributeError half-way through the compile.
+    if not hasattr(dspy, "TypedPredictor"):
+        raise click.ClickException(
+            "AvatarOptimizer is unavailable in the installed DSPy version "
+            "(it depends on dspy.TypedPredictor, which this release no longer ships). "
+            "Use 'compile gepa' or 'compile mipro' for instruction optimization instead."
+        )
+
+    # AvatarOptimizer requires an acting agent module (dspy.ReAct with tools)
     # that produces 'actions' in its output. Simple Predict/ChainOfThought
     # modules don't have actions and will crash.
     test_result = student(question="test")
     if not hasattr(test_result, "actions"):
         fail(
-            "AvatarOptimizer requires an acting agent module (e.g., ReActV2 with tools)"
+            "AvatarOptimizer requires an acting agent module (e.g., dspy.ReAct with tools)"
         )
         raise click.ClickException(
             "AvatarOptimizer is designed for acting agents that produce 'actions' in their output. "
@@ -1273,7 +1561,7 @@ def compile_distill(
     # Step 1: Teacher optimization (GEPA with reflection_lm)
     click.echo("  [1/2] Teacher optimizing instructions...")
 
-    gepa_opt = dspy.GEPA(metric=exact_match_metric(), auto=auto, reflection_lm=teacher)
+    gepa_opt = _build_gepa(exact_match_metric(), auto=auto, reflection_lm=teacher)
     # Split valset to avoid GEPA overfitting warning
     val_size = max(3, len(trainset) // 5) if len(trainset) >= 6 else 0
     gepa_kwargs: dict[str, Any] = {"student": student}
@@ -1287,7 +1575,9 @@ def compile_distill(
     # Step 2: Student finetuning on optimized prompts
     click.echo("  [2/2] Student absorbing via finetune...")
 
-    ft_opt = dspy.BootstrapFinetune(metric=exact_match_metric(), num_iters=num_iters)
+    ft_opt = dspy.BootstrapFinetune(
+        metric=exact_match_metric(), train_kwargs={"n_epochs": num_iters}
+    )
     distilled = ft_opt.compile(student=optimized, trainset=trainset)
 
     # MLflow tracking

@@ -7,8 +7,9 @@ Optimization 23: setup_dspy() guard — skips full init if already configured.
 
 from __future__ import annotations
 
+import json
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 
 if TYPE_CHECKING:
     import dspy
@@ -21,6 +22,61 @@ from dspytools.config.settings import load_config
 # Optimization 23: Track whether setup_dspy() has been called
 _setup_configured = False
 _baml_patched = False
+
+# `model_type="auto"` routes OpenAI-compatible models to the /v1/responses
+# endpoint.  Local llama.cpp servers only serve /v1/chat/completions, so "chat"
+# is the project default.  Override with `dspy.model_type` in config
+# ("auto"/"responses") for models that need it.
+_DEFAULT_MODEL_TYPE = "chat"
+
+
+def _model_type(
+    cfg: dict, explicit: str | None = None, *, embedding: bool = False
+) -> str | None:
+    """Resolve the LM API family: explicit argument, then config, then "chat".
+
+    LMRegistry is for chat/completion LMs; embeddings go through
+    dspy.Embedder.  Embedding models therefore get no ``model_type`` default.
+    """
+    if explicit:
+        return explicit
+    configured = cfg.get("dspy", {}).get("model_type")
+    if configured:
+        return configured
+    return None if embedding else _DEFAULT_MODEL_TYPE
+
+
+def _reasoning_kwargs(section: dict) -> dict[str, Any]:
+    """Translate thinking config into DSPy's ``reasoning_effort`` dial.
+
+    DSPy rejects ``chat_template_kwargs`` (``LMUnsupportedFeatureError``: the
+    canonical Request has no such field) and spells the reasoning dial
+    ``reasoning_effort``, forwarded verbatim into the request body.
+
+    - explicit ``reasoning_effort`` always wins;
+    - legacy ``enable_thinking: false`` -> ``reasoning_effort="none"``;
+    - legacy ``enable_thinking: true`` -> no kwarg (server default keeps
+      thinking on);
+    - ``enable_thinking`` absent -> nothing sent.
+    """
+    if section.get("reasoning_effort") is not None:
+        return {"reasoning_effort": section["reasoning_effort"]}
+    enable_thinking = section.get("enable_thinking")
+    if enable_thinking is None:
+        return {}
+    return {} if enable_thinking else {"reasoning_effort": "none"}
+
+
+def _lm_cache_key(model: str, lm_kw: dict[str, Any]) -> str:
+    """Cache key covering every setting that changes generated output.
+
+    Sharing LM instances across modules is what makes DSPy's own cache hit
+    (Optimization 9), but two differently-configured LMs must never share one
+    — e.g. ``reasoning_effort="none"`` vs. no dial at all.  ``api_key`` is
+    excluded: it does not change output and does not belong in a dict key.
+    """
+    behavior = {k: v for k, v in lm_kw.items() if k not in ("api_key",)}
+    return f"{model}|{json.dumps(behavior, sort_keys=True, default=str)}"
 
 
 class LMRegistry:
@@ -45,13 +101,12 @@ class LMRegistry:
     ) -> dspy.LM:
         """Get or create a cached LM instance.
 
-        Keyed by (model, api_base) tuple to reuse connections.
+        Keyed by model plus every generation setting that changes output.
+        LMRegistry is for chat/completion LMs; embeddings go through
+        dspy.Embedder, so models whose name contains "embed" get no
+        ``model_type`` default injected.
         """
         resolved_model = model or "openai/gpt-4o"
-        key = f"{resolved_model}|{api_base or ''}"
-
-        if key in cls._instances:
-            return cls._instances[key]
 
         lm_kw: dict[str, Any] = {
             "model": resolved_model,
@@ -59,14 +114,30 @@ class LMRegistry:
             "max_tokens": kwargs.get("max_tokens", 4096),
             "cache": kwargs.get("cache", True),
         }
+        model_type = _model_type(
+            load_config(),
+            kwargs.get("model_type"),
+            embedding="embed" in resolved_model.lower(),
+        )
+        if model_type:
+            lm_kw["model_type"] = model_type
         if api_key:
             lm_kw["api_key"] = api_key
         if api_base:
             lm_kw["api_base"] = api_base
-        # Pass through extra LM kwargs (e.g. chat_template_kwargs for thinking models)
+        # Pass through extra LM kwargs (e.g. reasoning_effort for thinking models)
         for k, v in kwargs.items():
-            if k not in lm_kw and k not in ("model", "api_base", "api_key"):
+            if k not in lm_kw and k not in (
+                "model",
+                "api_base",
+                "api_key",
+                "model_type",
+            ):
                 lm_kw[k] = v
+
+        key = _lm_cache_key(resolved_model, lm_kw)
+        if key in cls._instances:
+            return cls._instances[key]
 
         lm = dspy.LM(**lm_kw)  # type: ignore[arg-type]
         cls._instances[key] = lm
@@ -85,7 +156,7 @@ class LMRegistry:
         if student_cfg:
             api_key = student_cfg.get("api_key")
             api_base = student_cfg.get("api_base")
-            # Auto-supply dummy key for local LLM — LiteLLM requires non-empty
+            # Auto-supply dummy key for local LLM — the OpenAI-compatible client requires non-empty
             if (
                 not api_key
                 and api_base
@@ -98,15 +169,8 @@ class LMRegistry:
                 api_key=api_key,
                 temperature=student_cfg.get("temperature", 0.2),
                 max_tokens=student_cfg.get("max_tokens", 4096),
-                **(
-                    {
-                        "chat_template_kwargs": {
-                            "enable_thinking": student_cfg["enable_thinking"]
-                        }
-                    }
-                    if "enable_thinking" in student_cfg
-                    else {}
-                ),
+                model_type=student_cfg.get("model_type"),
+                **_reasoning_kwargs(student_cfg),
             )
             cls._default = lm
             return lm
@@ -138,8 +202,8 @@ class LMRegistry:
         if teacher_cfg:
             teacher_api_base = teacher_cfg.get("api_base")
             teacher_api_key = teacher_cfg.get("api_key")
-            # Auto-supply dummy key for local LLM — prevents litellm from
-            # picking up DEEPSEEK_API_KEY from env for local endpoints
+            # Auto-supply dummy key for local LLM — keeps the remote provider key
+            # from being sent to a local endpoint
             if (
                 not teacher_api_key
                 and teacher_api_base
@@ -154,15 +218,8 @@ class LMRegistry:
                 temperature=teacher_cfg.get("temperature", 0.0),
                 max_tokens=teacher_cfg.get("max_tokens", 4096),
                 cache=True,
-                **(
-                    {
-                        "chat_template_kwargs": {
-                            "enable_thinking": teacher_cfg["enable_thinking"]
-                        }
-                    }
-                    if "enable_thinking" in teacher_cfg
-                    else {}
-                ),
+                model_type=teacher_cfg.get("model_type"),
+                **_reasoning_kwargs(teacher_cfg),
             )
             return cls._teacher
 
@@ -235,6 +292,8 @@ def setup_dspy(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 cache=cache,
+                model_type=student.get("model_type"),
+                **_reasoning_kwargs(student),
             )
     else:
         if api_key is None and model:
@@ -254,7 +313,7 @@ def setup_dspy(
                     api_base = opts["api_base"]
                     break
 
-        # Auto-supply dummy key for local models (LLM/LMStudio) — LiteLLM requires non-empty
+        # Auto-supply dummy key for local models (LLM/LMStudio) — the client requires non-empty
         if (
             not api_key
             and api_base
@@ -337,13 +396,13 @@ def setup_dspy(
 
         _JSONAdapter.__call__ = _patched_json_call
 
-        # ReActV2 + Reasoning-field fix: ReActV2's react signature has output
+        # dspy.ReAct + Reasoning-field fix: ReAct's react signature has output
         # fields [next_thought (dspy.Reasoning), tool_calls (dspy.ToolCalls)].
         # With native function calling, the provider returns tool_calls in the
         # API response and reasoning in reasoning_content — the JSON body the
         # model emits contains tool_calls but often omits next_thought.
         # JSONAdapter.parse() strict-requires every output field key, so the
-        # parse fails and ReActV2's tool loop dies before executing tools.
+        # parse fails and ReAct's tool loop dies before executing tools.
         # Fix: patch JSONAdapter.parse() to treat missing dspy.Reasoning-typed
         # output fields as optional (they are filled from reasoning_content or
         # defaulted to None in _call_postprocess). Non-Reasoning missing fields
@@ -409,7 +468,7 @@ def setup_dspy(
                 if k in signature.output_fields:
                     parsed[k] = parse_value(v, signature.output_fields[k].annotation)
 
-            # DSPy 3.3.1: stock JSONAdapter.parse ends with
+            # Stock JSONAdapter.parse ends with
             # apply_output_field_defaults(), which fills any omitted optional
             # output field (declared default / default factory / None-allowing
             # annotation). Our override must keep that behavior so defaulted or
@@ -427,10 +486,14 @@ def setup_dspy(
 
             # Reasoning fields may be absent — populated from reasoning_content
             # or defaulted in _call_postprocess. Other fields must all be present.
+            # A ChainOfThought rationale is typed as `dspy.Reasoning`
+            # (str-like, but not a str instance); tolerate it bare or wrapped
+            # in an Optional/Union annotation.
             required = {
                 k
                 for k in signature.output_fields
                 if signature.output_fields[k].annotation is not Reasoning
+                and Reasoning not in get_args(signature.output_fields[k].annotation)
             }
             if required and not required.issubset(set(parsed.keys())):
                 raise AdapterParseError(
@@ -443,8 +506,8 @@ def setup_dspy(
 
         _JSONAdapter.parse = _parse_with_reasoning_tolerance
 
-        # BAMLAdapter overrides parse() with its own strict key check — patch it
-        # the same way so ReActV2's Reasoning fields are tolerated there too.
+        # BAMLAdapter inherits JSONAdapter.parse(), but patch it explicitly as
+        # well so ReAct's Reasoning fields are tolerated even if that changes.
         from dspy.adapters.baml_adapter import BAMLAdapter as _BAMLAdapter2
 
         _BAMLAdapter2.parse = _parse_with_reasoning_tolerance
@@ -452,14 +515,19 @@ def setup_dspy(
 
     # Read configured adapter from config, default to BAMLAdapter
     cfg = load_config()
-    adapter_type = cfg.get("dspy", {}).get("adapter", "baml")
+    adapter_type = str(cfg.get("dspy", {}).get("adapter", "baml")).strip().lower()
 
     # Always lazily import to avoid startup cost; BAMLAdapter is already imported
     # via the patch above, so reuse its module reference.
     from dspy.adapters.baml_adapter import BAMLAdapter as _BAMLAdapter
 
     # Build only the selected adapter (not all four) — the others would be
-    # constructed and immediately discarded.
+    # constructed and immediately discarded.  "baml" is the project's tuned
+    # default; "chat"/"json"/"xml" are the stock DSPy adapters.  BAML, Chat and
+    # XML are built with native function calling OFF because the local
+    # llama.cpp server returns tool calls as plain text, not as API tool_calls
+    # (the stock ChatAdapter()/XMLAdapter() already default to off).  JSON keeps
+    # stock behavior (native FC on) since it is the structured-output path.
     if adapter_type == "chat":
         adapter = dspy.ChatAdapter()
     elif adapter_type == "json":
@@ -476,11 +544,11 @@ def setup_dspy(
             adapter=adapter,
             warn_on_type_mismatch=warn_type,
         )
-    except RuntimeError as _exc:
-        # DSPy v3.3.0b1 thread-safety: once dspy.settings.configure() is called
-        # from one thread, only that thread may call it again.  If another thread
-        # already owns settings (e.g. MLflow autolog in a worker, or a prior test
-        # suite run), calling configure() here raises RuntimeError.
+    except RuntimeError:
+        # DSPy thread-safety: once dspy.settings.configure() is called from one
+        # thread, only that thread may call it again.  If another thread already
+        # owns settings (e.g. MLflow autolog in a worker, or a prior test suite
+        # run), calling configure() here raises RuntimeError.
         # Fall back: set values directly in main_thread_config (Settings.__setattr__
         # delegates to configure(), but main_thread_config is a plain dotdict so
         # direct assignment bypasses the thread-safety check).
@@ -498,11 +566,6 @@ def setup_dspy(
     from dspytools.core.hotswap import HotSwapManager
 
     HotSwapManager()
-
-    # DSPy 3.x compatibility: TypedPredictor was removed, replaced by Predict
-    # with typed signatures. AvatarOptimizer and other legacy code reference it.
-    if not hasattr(dspy, "TypedPredictor"):
-        dspy.TypedPredictor = dspy.Predict
 
     _setup_configured = True  # Optimization 23: Mark as configured
     return lm
