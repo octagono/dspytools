@@ -144,9 +144,12 @@ dependencies = ["litellm", "pydantic", "requests"]"""
 
 
 def load_mcp_tools_sync() -> tuple[list[Any], list[dspy.Tool]]:
-    """Load MCP git tools from .mcp.json config.
+    """Load MCP git tools from `.mcp.json` in the current working directory.
 
-    Returns (sessions, tools) — tools are dspy.Tool instances.
+    Returns `(sessions, tools)` — tools are `dspy.Tool` instances built by
+    `MCPSessionPool`, the same conversion the MCP server/CLI paths use.
+    Defensive by contract: missing, malformed, or empty config, and connection
+    failures inside the pool, all yield an empty tool list instead of raising.
     """
     sessions: list[Any] = []
     tools: list[dspy.Tool] = []
@@ -167,11 +170,8 @@ def load_mcp_tools_sync() -> tuple[list[Any], list[dspy.Tool]]:
         return sessions, tools
 
     pool = MCPSessionPool()
-    for server_name, server_config in mcp_servers.items():
-        session = pool.create_session(server_name, server_config)
-        sessions.append(session)
-        for tool in session.tools:
-            tools.append(tool)
+    tools = list(pool.get_tools(str(mcp_config_path)))
+    sessions = [session for (_name, session, _result) in pool._sessions]
 
     return sessions, tools
 

@@ -33,9 +33,9 @@ This doc owns all files directly in `src/dspytools/core/` and their contracts. T
 | `holdout.py` | Programmatic holdout enforcement (Invariant 5) |
 | `loaders.py` | Shared dataset/module loading + SSOT utilities (`prediction_to_dict`, `prediction_output`, `get_example_inputs`, `join_inputs`) |
 | `metrics.py` | Shared DSPy metric factories (SSOT) |
-| `cost_tracker.py` | Token counting and cost estimation |
+| `cost_tracker.py` | Real token accounting (`Prediction.get_lm_usage()` / `lm.history`) plus `PRICING`-based cost estimates |
 | `sprt_mojo_bridge.py` | Mojo-accelerated SPRT bridge |
-| `retry.py` | Auto-retry with exponential backoff |
+| `retry.py` | DSPy-aligned auto-retry with exponential backoff and `retry_after` hints |
 | `dspy_modules.py` | Quality scoring and diagnostic DSPy module definitions |
 | `errors.py` | Typed exception hierarchy |
 | `logging_config.py` | Centralized structured logging via structlog — `get_logger(__name__)` is the standard logger accessor for all dspytools modules |
@@ -72,6 +72,7 @@ This doc owns all files directly in `src/dspytools/core/` and their contracts. T
 - `LMRegistry.get_teacher()` — returns the teacher LM from `config["lm"]["teacher"]`. **MUST NEVER be used for inference.** Only for GEPA/distill/finetune optimization paths.
 - `LMRegistry.clear()` — resets all cached instances (used in tests).
 - `setup_dspy()` — calls `dspy.configure(lm=...)` with an LM from the registry. Auto-resolves `api_base` from the configured student model or registry entries when not explicitly provided. Reads `.env` for API keys. Call once at startup.
+  - **Usage tracking defaults on**: `_default_track_usage()` writes `track_usage = True` into dspy's `main_thread_config` (the dict `configure()` writes and every `dspy.context` copies) whenever config does not set it, so `Prediction.get_lm_usage()` is populated for `core.cost_tracker`. It is deliberately *not* injected as a `dspy.configure` kwarg — the "never forward an unset key" contract for configure kwargs stays exact — and a persisted `dspy.track_usage: false` still wins via `_runtime_settings`.
   - **Adapter**: reads `cfg["dspy"]["adapter"]` from config (set via `dspytools configure adapter set`). Defaults to `BAMLAdapter(use_native_function_calling=False)`. Supports `"baml"`, `"chat"`, `"json"`, `"xml"` types. Only the selected adapter is constructed (not all four); unknown/stale config values fall back to `BAMLAdapter`.
   - **Reasoning patch**: always patched into `baml_adapter._render_type_str` — renders `dspy.Reasoning` as plain `"string"` instead of expanding the Pydantic schema (prevents Qwen 7B outputting `"reasoning"` key instead of `"next_thought"`).
   - **Parse patch**: `JSONAdapter.parse`/`BAMLAdapter.parse` are replaced with a reasoning-tolerant parse. It first tries strict JSON (json_repair + `{...}` regex), then falls back to ChatAdapter-style `[[ ## field ## ]]` section parsing — small local models (Qwen) echo the BAML template back verbatim instead of emitting JSON. After the `parse_value` cast it applies DSPy 3.5's `apply_output_field_defaults` (so omitted defaulted/nullable output fields are filled, matching stock JSONAdapter behavior) and only then enforces presence of required (non-Reasoning) output fields; missing `dspy.Reasoning` fields are tolerated (filled from `reasoning_content` in `_call_postprocess`). **Version-compat**: `apply_output_field_defaults` is imported with feature-detection (try/except ImportError) so a future DSPy that moves/renames the helper degrades to skip-default-filling rather than hard-crashing setup — this is a symbol-level compat guard on a hard dependency, the sole exception to Golden Rule 4's no-guarded-imports.
@@ -79,9 +80,9 @@ This doc owns all files directly in `src/dspytools/core/` and their contracts. T
 ### `hotswap.py` — LRU-cached program hot-swap
 
 - `HotSwapManager` holds up to `MAX_LOADED = 16` compiled programs in an `OrderedDict` for LRU eviction.
-- `_load_program_from_run(run_id)` — deterministic loader using `metadata.json`'s `module_type` field (no Predict→ChainOfThought fallback chain). Supports `module_type` values: `"predict"`/default → Predict, `"cot"` → ChainOfThought, `"react"` → ReAct, `"flex"` → `dspy.Flex` (reconstructed with the default `PythonInterpreter` sandbox). Reads `signature.json` and `program.json` from the run directory.
+- `_load_program_from_run(run_id, run_path=None)` — deterministic loader using `metadata.json`'s `module_type` field (no Predict→ChainOfThought fallback chain). Supports `module_type` values: `"predict"`/default → Predict, `"cot"` → ChainOfThought, `"react"` → ReAct, `"flex"` → `dspy.Flex` (reconstructed with the default `PythonInterpreter` sandbox). Reads `signature.json` and `program.json` from the run directory. `run_path` overrides the `compiled_dir()/run_id` lookup so a run directory elsewhere (`dspytools evaluate run <path>`) loads in its saved shape. **Provenance**: before loading, `core.programs.is_current_dspy_version()` is checked; a program saved by another DSPy logs `dspy_version_mismatch` (saved vs. current version + recompile hint) and is still loaded — 3.5 changed prompts/adapters, so the warning is the signal to recompile.
 - `swap(run_id)` — switches active program, O(1). Returns previous active ID.
-- `infer(**inputs)` — runs inference on the active program. Returns a dict (not a DSPy `Prediction`). **SSOT: checks semantic cache (`get_semantic_cache()`) before hitting the LM. Stores result after LM call.** Scores once via `auto_metric`, reuses score for drift monitoring and self-evolve quality tracking. Increments refcount on entry (try), decrements in `finally` block — guarantees cleanup on cache hit, exception, or normal return. On critical drift alert, calls `SemanticCache.adjust_threshold()` to dynamically tighten the cache threshold. **Graceful degradation**: a Redis/FalkorDB outage during cache init/check/store/adjust degrades to "cache miss → hit the LM directly" (catches `ServiceUnavailableError`/`ConnectionError`, logs `semantic_cache_unavailable`) — inference never crashes because the semantic cache is down.
+- `infer(**inputs)` — runs inference on the active program. Returns a dict (not a DSPy `Prediction`). **SSOT: checks semantic cache (`get_semantic_cache()`) before hitting the LM. Stores result after LM call.** Scores once via `auto_metric`, reuses score for drift monitoring and self-evolve quality tracking. Increments refcount on entry (try), decrements in `finally` block — guarantees cleanup on cache hit, exception, or normal return. On critical drift alert, calls `SemanticCache.adjust_threshold()` to dynamically tighten the cache threshold. **Cache serialization rule**: the stored payload is built by `_json_safe_output()` (`dspy.Reasoning` and other non-JSON values become `str`, ndarrays become lists); a payload that still cannot be JSON-encoded is logged (`semantic_cache_serialize_failed`) and treated as a **cache miss** — serialization never fails a request. **Scoring rule**: the drift/quality score is computed from `loaders.prediction_output(result)` (the `answer`/`output` field), never from the first output field — for CoT programs the first field is `reasoning`, and grading it produced meaningless drift alerts and recompile queues. **Graceful degradation**: a Redis/FalkorDB outage during cache init/check/store/adjust degrades to "cache miss → hit the LM directly" (catches `ServiceUnavailableError`/`ConnectionError`, logs `semantic_cache_unavailable`) — inference never crashes because the semantic cache is down.
 - `swap(run_id, wait_for_drain=False)` — if `wait_for_drain=True` and the active program has outstanding `_refcount > 0`, blocks up to 30s polling until refcount reaches 0. Raises `TimeoutError` if drain times out. After swap, calls `_prefetch_dependents()` to pre-load downstream programs into LRU cache (predictive prefetching via SkillGraph lineage).
 - `warm_swap(run_id)` — loads, reads signature.json to construct field-appropriate test input, runs a verification inference, then swaps. Returns previous active ID (str) or raises `RuntimeError` on test failure / `KeyError` if not found. Uses `_build_test_input()` to inspect signature fields instead of hardcoding `{"input": "test"}`.
 - `load_all()` — loads all programs from `compiled/index.json`, auto-activates first.
@@ -149,15 +150,20 @@ This doc owns all files directly in `src/dspytools/core/` and their contracts. T
 - `DriftMonitor.status()` — returns full status dict with programs_tracked, thresholds, and per-program baseline/current/delta.
 - `DriftMonitor.request_recompile(run_id)` — queues a program for automatic recompilation when critical drift is detected. Called by `HotSwapManager.infer()` on critical alerts.
 - `DriftMonitor.pending_recompiles()` — returns list of programs queued for recompilation.
-- `DriftMonitor.process_recompile_requests(auto_fix=False)` — processes pending recompile queue. Dry-run mode by default; `auto_fix=True` triggers recompilation via GFLPipeline. **Delta-optimization**: uses `compile_draft()` for minor drift (<10%) and `run_single()` for major drift, selecting strategy based on drift severity. **Closes the loop**: on successful recompile the freshly compiled run is registered, baseline-updated, and hot-swapped into active service via `HotSwapManager` (best-effort — a swap failure logs `drift_fix_swap_failed` and leaves the run persisted but not active, never crashes).
+- `DriftMonitor.process_recompile_requests(auto_fix=False)` — processes pending recompile queue. Dry-run mode by default; `auto_fix=True` triggers recompilation via GFLPipeline. **Trainset requirement**: auto-fix only recompiles against a real trainset — registered via `DriftMonitor.register_trainset(run_id, trainset)` (in-memory) or discovered from the run's registry metadata (`trainset`/`trainset_path`/`dataset`/`dataset_path` file path). When neither exists the request is **refused** (`status: "skipped"`, actionable message, request stays queued) instead of compiling against a fabricated one-example placeholder and hot-swapping the result into service. **Delta-optimization**: uses `compile_draft()` for minor drift (<10%) and `run_single()` for major drift, selecting strategy based on drift severity; the saved `signature.json` is derived from the trainset (`_signature_from_trainset`) rather than hardcoded `input`/`output`. **Closes the loop**: on successful recompile the freshly compiled run is registered, baseline-updated, and hot-swapped into active service via `HotSwapManager` (best-effort — a swap failure logs `drift_fix_swap_failed` and leaves the run persisted but not active, never crashes).
+- `DriftMonitor.register_trainset(run_id, trainset)` / `get_trainset(run_id)` — supply the real data for drift auto-fix (empty trainsets raise `ValueError`). In-memory only: trainsets are never serialized into `drift_state.json`.
 - `get_drift_monitor()` — module-level singleton accessor.
-- **Drift → recompile loop**: `hotswap.py` calls `request_recompile()` on critical alerts. `dspytools self auto-fix` inspects and processes the queue.
+- **Drift → recompile loop**: `hotswap.py` calls `request_recompile()` on critical alerts. `dspytools self auto-fix` inspects and processes the queue; it needs a registered trainset for each queued run.
 - State persisted to `~/.config/dspytools/drift_state.json`.
 
 ### `retry.py` — Auto-retry with exponential backoff
 
-- `retry(max_retries=3, base_delay=2.0, max_delay=60.0, backoff_factor=2.0, retryable_exceptions=...)` — Decorator that wraps a function with exponential backoff retry logic. Retries on `TimeoutError`, `ConnectionError`, `OSError` by default. Non-retryable exceptions are re-raised immediately.
-- `compile_with_retry(compile_fn, *args, max_retries=3, base_delay=2.0, **kwargs)` — Function wrapper that runs a compile call with retry and returns `(result, stats_dict)`. The stats dict includes `attempts`, `retries`, `errors`, and `total_delay`. Also retries on `RuntimeError` (covers OOM conditions).
+- **DSPy-aligned taxonomy**: the retryable set is `retryable_exceptions()` — stdlib transients (`TimeoutError`, `ConnectionError`, `OSError`) plus DSPy's own `_RETRYABLE_LM_ERRORS` (`LMRateLimitError`, `LMTimeoutError`, `LMServerError`, `LMTransportError`, `LMLockTimeoutError`), read from the installed dspy on first use, never hardcoded. `non_retryable_exceptions()` is the never-retry set (`ContextWindowExceededError`, `LMInvalidRequestError`, `LMAuthError`, `LMBillingError`, `LMConfigurationError`, `LMNotConfiguredError`, `LMUnsupportedFeatureError`, `LMUnsupportedModelError`, `LMCollectionLimitError`).
+- **Never-retry wins**: `_is_retryable()` checks the never-retry set first, so even a caller who widens `retryable_exceptions=(Exception,)` cannot retry a context-window/auth/billing failure — those can never succeed and only burn money. `LMUnexpectedError` is *not* retried: upstream deliberately excludes it (`is_retryable_lm_error` returns False), since unclassified engine failures carry no evidence they are transient.
+- `retry_after_seconds(exc)` — `DSPyError.__init__` always sets `retry_after` (float seconds or `None`); invalid values (negative, NaN/inf, bools, non-numeric) are ignored. When a hint exists the delay is `min(retry_after, max_delay)`, otherwise `min(base_delay * backoff_factor**attempt, max_delay)`.
+- `retry(max_retries=3, base_delay=2.0, max_delay=60.0, backoff_factor=2.0, retryable_exceptions=None)` — decorator. `None` resolves the default tuple lazily; retries are logged as `retry_attempt`. Non-retryable exceptions are re-raised immediately.
+- `compile_with_retry(compile_fn, *args, max_retries=3, base_delay=2.0, **kwargs)` — runs a compile call and returns `(result, stats_dict)` with `attempts`, `retries`, `errors`, `total_delay`. Also retries `RuntimeError` (OOM) and honours `retry_after`.
+- Importing this module never imports dspy (the exception types load on first retry call).
 - Used by `commands/compile.py` (3 retries, 2s base delay) and `gfl/pipeline.py` (2 retries, 2s base delay via `@retry` decorator on `_dispatch_optimizer`).
 
 ### `holdout.py` — Programmatic holdout enforcement (Invariant 5)
@@ -180,22 +186,32 @@ This doc owns all files directly in `src/dspytools/core/` and their contracts. T
 ### `metrics.py` — Shared DSPy metric functions (SSOT)
 
 - **Single Source of Truth** for all DSPy-compatible scoring functions across compile commands and GFL pipeline.
+- `normalize_text(text)` — comparison normalization: strip, casefold, collapse whitespace, strip surrounding punctuation/quotes (so `"Paris."` == `"Paris"`).
+- `answer_exact_match(gold, pred)` — normalized equality of two answers (symmetric: two absent answers compare equal).
+- `answer_overlap_score(gold, pred)` — `1.0` on normalized equality, else fraction of gold tokens covered by the prediction, capped at `0.99` so a non-exact answer is never "perfect" (GEPA's `skip_perfect_score` would drop it).
 - `exact_match_metric(val_field="output")` — factory returning a `(example, prediction, trace) -> float` metric.
-  - Compares `getattr(prediction, val_field, "")` to `getattr(example, val_field, "")`.
-  - Returns `1.0` on exact match, `0.0` otherwise.
+  - Compares `getattr(prediction, val_field, "")` to `getattr(example, val_field, "")` **after normalization** — byte-exactness scored `"Paris."` vs `"Paris"` as 0 and left bootstrap optimizers with zero demos.
+  - Returns `1.0` on match, `0.0` otherwise.
   - `val_field` parameter allows flexible field selection (e.g. `"answer"`, `"output"`).
-  - Used by `commands/compile.py`, `gfl/pipeline.py`, `gfl/optimizer.py`.
+  - Used by `commands/compile.py`, `gfl/pipeline.py`, `skills/manager.py`.
+- `gepa_metric(gold, pred, trace, pred_name, pred_trace, *, val_field="output")` — GEPA metric returning `dspy.Prediction(score=<float in [0,1]>, feedback=<short specific text>)`: missing field, empty output, gold-vs-prediction delta and the score. A bare float left the reflection teacher optimizing markdown shape instead of correctness. Used by `commands/compile.py` and `gfl/pipeline.py`.
+- `gepa_metric_float(...)` — plain-float fallback for callers that consume the metric numerically (`dspy.Evaluate` sums metric returns, so `dspy.BetterTogether` must use this one).
 - `gepa_metric_cost_aware(val_field="output", lm_call_penalty=0.01)` — factory returning a 6-arg GEPA metric `(gold, pred, trace, pred_name, pred_trace, program_trace)`. Scores via `auto_metric` then subtracts `lm_call_penalty * len(program_trace)` when `program_trace` is populated (Flex optimization scoring), clamped to `[0.0, 1.0]`. Enables cost-aware Flex optimization via GEPA's `program_trace` parameter. Used by `commands/compile.py` (`compile flex`).
 - All metric factories accept configurable field names — no hardcoded `"output"` in call sites.
 
 ### `cost_tracker.py` — Token counting and cost estimation
 
 - `PRICING` dict maps model names to `{"input": price, "output": price}` per 1M tokens. Includes DeepSeek V4 Flash ($0.14/$0.28), DeepSeek V3 ($0.27/$1.10), Qwen 3B local ($0/$0), and a `"default"` fallback ($0.15/$0.60).
-- `TokenUsage` dataclass: model, prompt/completion/total tokens, cost_estimate. `TokenUsage.estimate(model, prompt_tokens, completion_tokens)` computes cost using `PRICING`.
+- **Two sources, one sink.** Measured usage comes from DSPy; estimates come from `PRICING`. Both land in the same `CompileCost.calls` list, distinguished by `TokenUsage.measured`.
+- `TokenUsage` dataclass: model, prompt/completion/total tokens, cost_estimate, `measured`. `TokenUsage.estimate(model, prompt_tokens, completion_tokens)` prices counts from `PRICING` (`measured=False`); `TokenUsage.from_usage(model, usage, cost=None)` builds a measured record from one DSPy usage entry, preferring a provider-reported `cost` over the estimate.
+- **Measured shape (verified against dspy 3.5.0)**: `Prediction.get_lm_usage()` returns `{model: {prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details, completion_tokens_details, ...}}` and is `None` unless `settings.track_usage` is on; a `DummyLM`-backed call reports zeros. `lm.history[-1]` carries `usage` (same inner dict) and `cost` (float USD or `None`) — **cached calls report `None` for both**, since no request was made.
 - `CompileCost` dataclass: aggregates token usage across LM calls in a compile operation. Properties: `teacher_tokens` (deepseek models), `student_tokens` (non-deepseek), `elapsed_seconds`.
-- `CompileCost.add_call(model, prompt_tokens, completion_tokens)` — records a single LM call and updates totals.
+- `CompileCost.add_call(model, prompt_tokens, completion_tokens)` — estimate-based path, unchanged: records one call and prices it from `PRICING`.
+- `CompileCost.add_usage(usage_by_model) → int` — records measured usage in `get_lm_usage()` shape; entries with zero tokens and zero cost (cache hits) are skipped and do not inflate the call count.
+- `CompileCost.add_result(result, lm=None) → int` — records **real** usage from a DSPy result: `result.get_lm_usage()` first, falling back to `lm.history[-1]` when tracking was off. Returns how many records were added (0 for a cached call), so the estimate path remains the fallback for callers with no result object.
+- `usage_from_result(result)` / `usage_from_lm_history(lm)` — the pure extractors behind `add_result`; both tolerate non-`Prediction` results and return empty/`None` instead of raising.
 - `CompileCost.finish()` — records `finished_at` timestamp.
-- `CompileCost.summary()` — returns a dict with compile_id, optimizer, elapsed_seconds, total/teacher/student tokens, total_cost_usd, and call count.
+- `CompileCost.summary()` — returns compile_id, optimizer, elapsed_seconds, total/teacher/student tokens, total_cost_usd, call count, and the `measured_calls` / `estimated_calls` split (0 measured means pure estimates).
 
 ### `sprt_mojo_bridge.py` — Mojo-accelerated SPRT bridge (Phase 2)
 
@@ -236,12 +252,16 @@ This doc owns all files directly in `src/dspytools/core/` and their contracts. T
 - HotSwapManager max_loaded cap (16) is a soft limit via `while` eviction — be mindful of memory when adding programs.
 - Registry is JSON-only — `compiled/index.json` is the single source of truth for compiled runs.
 - All trainset and module loading must go through `loaders.py` functions — do not duplicate loading logic in command files.
+- Retry decisions come from `retry.retryable_exceptions()` / `non_retryable_exceptions()` — never from a hand-written exception list at a call site. Context-window, auth and billing failures must never be retried.
+- Cost reporting must prefer measured usage (`CompileCost.add_result`) over `PRICING` estimates (`add_call`) whenever a result object exists; `setup_dspy()` keeps `track_usage` on so measured usage is available.
 
 ## Verification
 
 - `ruff check --fix --unsafe-fixes` must pass with zero errors.
+- `uv run --no-sync pytest tests/test_optimizer_integrity.py -q` covers the `metrics.py` contracts (normalization, `gepa_metric` feedback, float fallback).
+- `uv run --no-sync pytest tests/test_dspy_optimizations.py -q` covers the retry taxonomy (`retry.py`), measured token accounting (`cost_tracker.py` + `setup_dspy`'s `track_usage` default), and the CLI `--parallel-tools` / `--stream` adapter paths.
 - Expected false positives from LSP stubs (`click`, `dspy`, `mcp`, `fastapi`, `dspy.LM`) are acceptable and ignored.
-- No additional CI or test framework is currently enforced beyond ruff. Update this section when one is added.
+- No other CI or test framework is enforced beyond ruff + those test modules. Update this section when more are added.
 
 ## Child DOX Index
 

@@ -20,21 +20,23 @@ Three source files:
 
 ### `signature_generator.py` — SignatureGeneratorDSPy
 
-- `SignatureGeneratorDSPy` is a `dspy.Module` subclass using `dspy.ChainOfThought`.
-- `forward(signature_str: str, class_name: str, instructions: str) → dspy.Prediction`
+- `SignatureGeneratorDSPy` is a **real `dspy.Module` subclass** (`super().__init__()` + `self.predictor = dspy.ChainOfThought(...)`) — `named_predictors()` and `forward` exist, so optimizers can actually compile it. Before, it was a plain class whose docstrings and this doc claimed compilability that DSPy cannot use.
+- `forward(prompt_text: str, class_name: str, task_instructions: str) → dspy.Prediction`
   - Input: DSPy signature string (`"question -> answer"`), class name, task instructions
-  - Output: `code` (Python class definition), `num_fields` (count of input + output fields), `warnings` (any issues)
+  - Output: `generated_code` (Python class definition), `field_count` (count of input + output fields), `warnings` (any issues)
+- `generate(...) → (code, field_count, warnings)` — tuple wrapper over `forward`, used by `commands/signature.py`.
 - **100% LLM-generated code** — no string formatting fallback. The LLM produces valid Python.
-- **Compilable**: can be optimized with `dspytools compile` to improve generation quality over time.
+- **Compilable**: `dspy.BootstrapFewShot().compile(gen, trainset=...)` traces the real predictor.
 
 ### `module_generator.py` — ModuleGeneratorDSPy
 
-- `ModuleGeneratorDSPy` is a `dspy.Module` subclass using `dspy.ChainOfThought`.
+- `ModuleGeneratorDSPy` is a **real `dspy.Module` subclass** with `forward` + `named_predictors()`.
 - `forward(module_name: str, signature_str: str, module_type: str, description: str) → dspy.Prediction`
   - Input: module name, DSPy signature, module type (e.g., `"ChainOfThought"`), description
-  - Output: `code` (Python module definition), `has_tools` (bool), `input_fields` (comma-separated)
+  - Output: `module_code` (Python module definition), `has_tools` (bool), `out_fields` (list of output field names)
+- `generate(...) → (code, has_tools, out_fields)` — tuple wrapper over `forward`, used by `commands/module.py`.
 - **100% LLM-generated code** — the LLM produces complete DSPy module definitions.
-- **Compilable**: can be optimized with `dspytools compile` for higher quality code generation.
+- **Compilable**: `dspy.MIPROv2().compile(gen, trainset=...)` traces the real predictor.
 
 ### Shared contracts
 
@@ -51,17 +53,22 @@ Three source files:
 
 ## Verification
 
-No automated tests exist yet. Manual smoke test:
+`uv run --no-sync pytest tests/test_serving_integrity.py -q` exercises the generator contracts indirectly (`module new --signature` passes `Signature.signature` to `ModuleGeneratorDSPy.generate`).
+
+Manual smoke test (needs an LM — not part of the offline suite):
 ```python
 from dspytools.generators import SignatureGeneratorDSPy, ModuleGeneratorDSPy
 
 sig_gen = SignatureGeneratorDSPy()
-result = sig_gen("question -> answer", "QASig", "Answer questions")
-assert result.code and "class" in result.code
+assert "predictor" in dict(sig_gen.named_predictors())  # a real dspy.Module
+result = sig_gen.generate("question -> answer", "QASig", "Answer questions")
+assert result[0] and "class" in result[0]
 
 mod_gen = ModuleGeneratorDSPy()
-result = mod_gen("QA", "question -> answer", "ChainOfThought", "QA module")
-assert result.code and result.has_tools is not None
+code, has_tools, out_fields = mod_gen.generate(
+    "QA", "question -> answer", "ChainOfThought", "QA module"
+)
+assert code
 ```
 
 ## Child DOX Index

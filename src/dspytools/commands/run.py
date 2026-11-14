@@ -8,7 +8,7 @@ import json
 import json as _json
 import re as _re
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -70,22 +70,61 @@ def _show_timing(start: float) -> None:
 
 
 # Fields DSPy 3.5 attaches to a Prediction alongside the user's outputs
-# (ReAct: history/termination_reason, RLM: history/final_reasoning/trajectory).
+# (ReAct: history/termination_reason, RLM: history/final_reasoning/trajectory,
+# ChainOfThought: reasoning — the whole rationale, rendered separately).
 _RESULT_META_FIELDS = frozenset(
-    {"history", "termination_reason", "final_reasoning", "trajectory"}
+    {
+        "history",
+        "termination_reason",
+        "final_reasoning",
+        "trajectory",
+        "reasoning",
+        "rationale",
+    }
 )
+
+# The reasoning/rationale field is never an answer: it is a str-like
+# ``dspy.Reasoning`` carrying the full chain of thought.
+_REASONING_FIELDS = ("reasoning", "rationale")
+_REASONING_PREVIEW_CHARS = 200
 
 
 def _result_fields(result: Any) -> list[str]:
     """Return a Prediction's declared output fields (DSPy 3.5 has no
-    ``_output_field_names``; fall back to the underlying store)."""
+    ``_output_field_names``; fall back to the underlying store).
+
+    Reasoning/rationale and DSPy's bookkeeping fields are excluded: callers
+    treat every returned name as an answer to display.
+    """
     names = getattr(result, "_output_field_names", None)
     if names:
-        return list(names)
+        return [name for name in names if name not in _RESULT_META_FIELDS]
     store = getattr(result, "_store", None)
     if isinstance(store, dict):
         return [name for name in store if name not in _RESULT_META_FIELDS]
     return []
+
+
+def _reasoning_preview(
+    result: Any, *, limit: int = _REASONING_PREVIEW_CHARS
+) -> str | None:
+    """Return a one-line, truncated preview of the model's reasoning."""
+    for fname in _REASONING_FIELDS:
+        raw = getattr(result, fname, None)
+        if not raw:
+            continue
+        text = " ".join(str(raw).split())
+        if not text:
+            continue
+        return text if len(text) <= limit else text[:limit].rstrip() + "…"
+    return None
+
+
+def _show_reasoning(result: Any) -> None:
+    """Show the chain of thought as a deliberate, labelled preview."""
+    preview = _reasoning_preview(result)
+    if preview:
+        info(f"[{_YELLOW}]Reasoning:[/] {preview}")
 
 
 def _show_result(
@@ -95,6 +134,7 @@ def _show_result(
     border: str = _RESULT,
 ) -> None:
     """Display a DSPy prediction in a panel with labelled output fields."""
+    _show_reasoning(result)
     names = _result_fields(result)
     lines = [
         f"[{_CYAN}]{fname}:[/]  {getattr(result, fname, '')}"
@@ -147,80 +187,149 @@ def _load_tools(tool_specs: tuple[str, ...]) -> list:
 
     tools: list = []
     for spec in tool_specs:
-        if ":" in spec and not spec.endswith(":") and "/" not in spec:
-            server_name, tool_name = spec.split(":", 1)
-            mcp_tools = _load_mcp_tools_for_server(server_name)
-            found = False
-            for t in mcp_tools:
-                if t.name == tool_name:
-                    tools.append(t)
-                    ok(f"Loaded tool '{tool_name}' from MCP server '{server_name}'")
-                    found = True
-                    break
-            if not found:
-                warn(f"Tool '{tool_name}' not found in MCP server '{server_name}'")
-        else:
-            try:
-                if ":" in spec:
-                    module_path, attr_name = spec.split(":", 1)
-                else:
-                    module_path, attr_name = spec.rsplit(".", 1)
-                mod = importlib.import_module(module_path)
-                func = getattr(mod, attr_name)
-                t = _build_dspy_tool(func, name=attr_name)
-                tools.append(t)
-                ok(f"Loaded tool '{attr_name}' from {module_path}")
-            except (ImportError, AttributeError, ValueError, TypeError):
-                warn(
-                    f"Tool '{spec}' not found. Use qualified names "
-                    f"(e.g. ``math.sqrt``) or register a function first."
-                )
+        if _load_mcp_tool(spec, tools):
+            continue
+        try:
+            if ":" in spec:
+                module_path, attr_name = spec.split(":", 1)
+            else:
+                module_path, attr_name = spec.rsplit(".", 1)
+            mod = importlib.import_module(module_path)
+            func = getattr(mod, attr_name)
+            t = _build_dspy_tool(func, name=attr_name)
+            tools.append(t)
+            ok(f"Loaded tool '{attr_name}' from {module_path}")
+        except (ImportError, AttributeError, ValueError, TypeError):
+            hint = " in any MCP server" if ":" in spec else ""
+            warn(
+                f"Tool '{spec}' not found{hint}. Use qualified names "
+                f"(e.g. ``math.sqrt``) or register a function first."
+            )
     return tools
 
 
-def _build_dspy_tool(func: Callable, name: str | None = None) -> dspy.Tool:
-    """Build a ``dspy.Tool`` that handles C extension / built-in functions."""
+def _load_mcp_tool(spec: str, tools: list) -> bool:
+    """Append the MCP tool named by ``server:tool``; ``False`` when not found.
 
+    A colon is ambiguous (``server:tool`` vs ``module:attr``), so a miss is not
+    an error: the caller falls back to importing the spec as a Python attribute.
+    """
+    if ":" not in spec or spec.endswith(":") or "/" in spec:
+        return False
+    server_name, tool_name = spec.split(":", 1)
+    for t in _load_mcp_tools_for_server(server_name):
+        if t.name == tool_name:
+            tools.append(t)
+            ok(f"Loaded tool '{tool_name}' from MCP server '{server_name}'")
+            return True
+    return False
+
+
+def _tool_arg_schema(param: inspect.Parameter) -> dict[str, Any]:
+    """JSON schema for one parameter, derived from its annotation."""
+    from pydantic import TypeAdapter
+
+    annotation = (
+        Any if param.annotation is inspect.Parameter.empty else param.annotation
+    )
+    schema = TypeAdapter(annotation).json_schema()
+    schema.pop("title", None)
+    if param.default is not inspect.Parameter.empty and isinstance(
+        param.default, (str, int, float, bool, type(None))
+    ):
+        schema["default"] = param.default
+    return schema
+
+
+def _build_dspy_tool(func: Callable, name: str | None = None) -> dspy.Tool:
+    """Build a ``dspy.Tool`` that also works for C extension / built-in functions.
+
+    Python functions are wrapped directly: ``dspy.Tool`` infers their args and
+    validates/coerces values against the declared type hints. Builtins expose a
+    text signature (``round(number, ndigits=None)``) but no annotations, so the
+    arg schema is built explicitly and the callable is invoked with keyword
+    arguments — never by positional remapping, and never with ad-hoc string to
+    number coercion (``dspy.Tool`` already coerces where a type is known).
+    """
     if inspect.isfunction(func) or inspect.ismethod(func):
         return dspy.Tool(func)
 
-    desc = getattr(func, "__doc__", "") or ""
     tool_name = name or getattr(func, "__name__", "tool")
+    desc = getattr(func, "__doc__", "") or ""
 
-    sig = inspect.signature(func)
-    params: dict[str, Any] = {}
-    for pname, param in sig.parameters.items():
-        if param.kind in (
-            inspect.Parameter.VAR_POSITIONAL,
-            inspect.Parameter.VAR_KEYWORD,
-        ):
-            continue
-        params[pname] = {"type": ["string", "number", "integer"]}
-        if param.default is not inspect.Parameter.empty:
-            params[pname]["default"] = param.default
-
+    params = [
+        param
+        for param in inspect.signature(func).parameters.values()
+        if param.kind
+        not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    ]
     if not params:
-        return dspy.Tool(func)
+        return dspy.Tool(func, name=tool_name)
 
-    param_names = list(params.keys())
+    arg_names = [param.name for param in params]
+    defaults = {param.name: param.default for param in params}
+    args = {param.name: _tool_arg_schema(param) for param in params}
+    arg_types = {
+        param.name: (
+            Any if param.annotation is inspect.Parameter.empty else param.annotation
+        )
+        for param in params
+    }
+    # Positional-only builtins (math.sqrt, len, ...) refuse keyword arguments.
+    positional_only = any(
+        param.kind is inspect.Parameter.POSITIONAL_ONLY for param in params
+    )
 
-    def _wrapped(**kwargs: object) -> Any:
-        mapped: list[object] = []
-        for p in param_names:
-            v = kwargs.pop(p, ...)
-            if v is ...:
-                continue
-            if isinstance(v, str):
-                for caster in (int, float):
-                    try:
-                        v = caster(v)
-                        break
-                    except (ValueError, TypeError):
-                        continue
-            mapped.append(v)
-        return func(*mapped, **kwargs)
+    def _call(**kwargs: Any) -> Any:
+        if not positional_only:
+            return func(**kwargs)
+        positional: list[Any] = []
+        for arg_name in arg_names:
+            if arg_name in kwargs:
+                positional.append(kwargs.pop(arg_name))
+            elif defaults[arg_name] is not inspect.Parameter.empty:
+                positional.append(defaults[arg_name])
+            else:
+                raise TypeError(
+                    f"{tool_name}() missing required argument: {arg_name!r}"
+                )
+        return func(*positional, **kwargs)
 
-    return dspy.Tool(_wrapped, name=tool_name, desc=desc, args=params)
+    return dspy.Tool(
+        _call,
+        name=tool_name,
+        desc=desc,
+        args=args,
+        arg_types=arg_types,
+    )
+
+
+def _sanitize_tool_names(tools: list) -> list:
+    """Rename tools to valid Python identifiers for RLM/Flex sandboxes.
+
+    MCP tool names are hyphenated (``git-mcp_list_files``) and ``dspy.RLM`` /
+    ``dspy.Flex`` reject them (``must be a valid Python identifier``). Renamed
+    copies keep the original function; renames are warned about.
+    """
+    used: set[str] = set()
+    sanitized: list = []
+    for tool in tools:
+        original = getattr(tool, "name", "") or type(tool).__name__
+        safe = _re.sub(r"\W", "_", original)
+        if not safe or safe[0].isdigit():
+            safe = f"tool_{safe}"
+        candidate, suffix = safe, 2
+        while candidate in used:
+            candidate = f"{safe}_{suffix}"
+            suffix += 1
+        if candidate != original:
+            warn(
+                f"Renamed tool '{original}' to '{candidate}' (must be a Python identifier)"
+            )
+            tool = tool.model_copy(update={"name": candidate})
+        used.add(candidate)
+        sanitized.append(tool)
+    return sanitized
 
 
 def _load_mcp_tools_for_server(server_name: str) -> list:
@@ -228,6 +337,127 @@ def _load_mcp_tools_for_server(server_name: str) -> list:
 
     pool = MCPSessionPool()
     return pool.get_tools(".mcp.json")
+
+
+# ── DSPy 3.5 adapter / streaming helpers ────────────────────────────────
+
+
+def _parallel_tools_adapter(adapter: Any) -> Any:
+    """Clone the active adapter with provider-side parallel tool calls on.
+
+    ``parallel_tool_calls`` only reaches the provider through
+    ``Adapter._call_preprocess`` when the adapter is built with
+    ``use_native_function_calling=True``; otherwise DSPy pops
+    ``tools``/``tool_choice``/``parallel_tool_calls`` from the LM kwargs and the
+    flag becomes a silent no-op.  So the clone always turns native function
+    calling on.
+
+    The *active* adapter is cloned (same class, same options) instead of being
+    rebuilt from config: that keeps the user's configured adapter and any
+    class-level patches ``setup_dspy()`` applied.  The global default is never
+    mutated — the clone is only used inside ``dspy.context(adapter=...)``.
+    """
+    if adapter is None:
+        raise click.ClickException(
+            "  no DSPy adapter is configured; call setup_dspy() before --parallel-tools"
+        )
+    params = inspect.signature(type(adapter).__init__).parameters
+    if "parallel_tool_calls" not in params:
+        raise click.ClickException(
+            f"  adapter {type(adapter).__name__} does not accept parallel_tool_calls "
+            "in DSPy 3.5; use --adapter chat, json, xml or baml"
+        )
+    kwargs: dict[str, Any] = {
+        "parallel_tool_calls": True,
+        "use_native_function_calling": True,
+    }
+    for name in ("callbacks", "native_response_types", "use_json_adapter_fallback"):
+        if name in params and hasattr(adapter, name):
+            kwargs[name] = getattr(adapter, name)
+    return type(adapter)(**kwargs)
+
+
+@contextmanager
+def _parallel_tools_context(enabled: bool):
+    """Scope the active adapter to one that requests parallel tool calls.
+
+    ``--parallel-tools`` is opt-in and off by default: with ``enabled=False``
+    this yields the unchanged global settings, so behaviour is identical to a
+    run without the flag.  When the configured LM cannot do native function
+    calling the flag cannot take effect, so it fails loudly instead of being
+    silently dropped.
+    """
+    if not enabled:
+        yield
+        return
+
+    lm = getattr(dspy.settings, "lm", None)
+    if not getattr(lm, "supports_function_calling", False):
+        model = getattr(lm, "model", None) or "the configured LM"
+        raise click.ClickException(
+            f"  --parallel-tools needs native function calling, which {model} does "
+            "not advertise; drop the flag or serve a function-calling endpoint"
+        )
+    with dspy.context(
+        adapter=_parallel_tools_adapter(getattr(dspy.settings, "adapter", None))
+    ):
+        yield
+
+
+def _stream_output_field(module: Any) -> str | None:
+    """Last declared output field of a Predict/ChainOfThought module.
+
+    ``dspy.ChainOfThought`` prepends a ``reasoning`` output field (rendered as
+    ``plan`` for LMs without native reasoning), so the *last* field is the
+    user's answer for both module types.
+    """
+    signature = getattr(module, "signature", None)
+    if signature is None:
+        signature = getattr(getattr(module, "predict", None), "signature", None)
+    fields = list(getattr(signature, "output_fields", ()) or ())
+    return fields[-1] if fields else None
+
+
+def _run_streaming(
+    module: Any, kwargs: dict[str, Any], *, adapter: Any
+) -> tuple[Any, int]:
+    """Run a program through ``dspy.streamify`` and echo chunks as they arrive.
+
+    Returns ``(final_prediction, chunks_printed)``.  ``async_streaming=False``
+    makes DSPy hand back a plain generator, so ``run predict``/``run cot`` stay
+    synchronous.  A cached result produces no ``StreamResponse`` chunks but DSPy
+    still emits the final ``Prediction`` (``include_final_prediction_in_output_stream``
+    defaults to true), so a cache hit renders normally instead of hanging.
+    """
+    field = _stream_output_field(module)
+    if field is None:
+        raise click.ClickException(
+            "  --stream needs a signature with at least one output field"
+        )
+
+    stream = dspy.streamify(
+        module,
+        stream_listeners=[dspy.streaming.StreamListener(signature_field_name=field)],
+        async_streaming=False,
+    )
+    info(f"Streaming: [{_DIM}]field '{field}'[/]")
+
+    result = None
+    chunks = 0
+    with dspy.context(adapter=adapter):
+        for value in stream(**kwargs):
+            if isinstance(value, dspy.Prediction):
+                result = value
+                continue
+            chunk = getattr(value, "chunk", None)
+            if chunk:
+                click.echo(chunk, nl=False)
+                chunks += 1
+    if chunks:
+        click.echo()
+    if result is None:
+        raise click.ClickException("  stream ended without a final prediction")
+    return result, chunks
 
 
 def _run_module(
@@ -238,6 +468,7 @@ def _run_module(
     temperature: float,
     max_tokens: int,
     adapter: str,
+    stream: bool = False,
 ) -> None:
     """Generic runner for Predict and ChainOfThought."""
     _show_command_header(module_type)
@@ -263,15 +494,24 @@ def _run_module(
 
         adapter_obj = BAMLAdapter(use_native_function_calling=False)
 
-    sp = rich_spinner()
-    with sp:
-        sp.add_task(f"Running {module_type}...")
-        with dspy.context(adapter=adapter_obj):
-            modules = {
-                "predict": dspy.Predict(signature),
-                "cot": dspy.ChainOfThought(signature),
-            }
-            result = modules[module_type](**kwargs)
+    module = {
+        "predict": dspy.Predict,
+        "cot": dspy.ChainOfThought,
+    }[module_type](signature)
+
+    if stream:
+        result, chunks = _run_streaming(module, kwargs, adapter=adapter_obj)
+        if not chunks:
+            info(
+                f"[{_DIM}]no streamed chunks "
+                "(cached result or a non-streaming adapter)[/]"
+            )
+    else:
+        sp = rich_spinner()
+        with sp:
+            sp.add_task(f"Running {module_type}...")
+            with dspy.context(adapter=adapter_obj):
+                result = module(**kwargs)
 
     _show_result(result)
     _show_timing(t0)
@@ -338,6 +578,12 @@ def run_cmd():
 @click.option(
     "--adapter", type=click.Choice(["chat", "json", "xml", "baml"]), default="chat"
 )
+@click.option(
+    "--stream",
+    is_flag=True,
+    default=False,
+    help="Stream output-field chunks as they arrive (falls back to the result panel on cache hits)",
+)
 def run_predict(
     signature: str,
     inputs: tuple[str, ...],
@@ -345,9 +591,12 @@ def run_predict(
     temperature: float,
     max_tokens: int,
     adapter: str,
+    stream: bool,
 ):
     """Run a Predict module.  SIGNATURE: e.g. ``"question -> answer"``"""
-    _run_module("predict", signature, inputs, lm, temperature, max_tokens, adapter)
+    _run_module(
+        "predict", signature, inputs, lm, temperature, max_tokens, adapter, stream
+    )
 
 
 # ── cot ──────────────────────────────────────────────────────────────────
@@ -362,6 +611,12 @@ def run_predict(
 @click.option(
     "--adapter", type=click.Choice(["chat", "json", "xml", "baml"]), default="chat"
 )
+@click.option(
+    "--stream",
+    is_flag=True,
+    default=False,
+    help="Stream output-field chunks as they arrive (falls back to the result panel on cache hits)",
+)
 def run_cot(
     signature: str,
     inputs: tuple[str, ...],
@@ -369,9 +624,58 @@ def run_cot(
     temperature: float,
     max_tokens: int,
     adapter: str,
+    stream: bool,
 ):
     """Run a ChainOfThought module."""
-    _run_module("cot", signature, inputs, lm, temperature, max_tokens, adapter)
+    _run_module("cot", signature, inputs, lm, temperature, max_tokens, adapter, stream)
+
+
+# ── agent execution ──────────────────────────────────────────────────────
+
+# A failed forced submit is not a plain ValueError: ReAct re-raises the parse
+# error and the context-window error from ``_forced_submit``. Resolved lazily so
+# importing this module never triggers the DSPy import.
+_AGENT_ERRORS: tuple[type[BaseException], ...] | None = None
+
+
+def _agent_errors() -> tuple[type[BaseException], ...]:
+    """Exception family raised by a failed ReAct forced submit."""
+    global _AGENT_ERRORS
+    if _AGENT_ERRORS is None:
+        _AGENT_ERRORS = (
+            ValueError,
+            dspy.AdapterParseError,
+            dspy.ContextWindowExceededError,
+        )
+    return _AGENT_ERRORS
+
+
+def _agent_failure(err: Exception, start: float | None = None) -> click.ClickException:
+    """Turn a failed agent run into a CLI error naming the last model output."""
+    rich_panel("Agent failed", str(err), border_style=_ERROR)
+    last_reply = _extract_reply_from_lm_history()
+    if last_reply:
+        rich_panel("Last model output", last_reply, border_style=_YELLOW)
+    if start is not None:
+        _show_timing(start)
+    return click.ClickException(str(err))
+
+
+def _run_agent(
+    module: Any,
+    kwargs: dict[str, Any],
+    *,
+    label: str = "Thinking...",
+    start: float | None = None,
+) -> Any:
+    """Run an agent module, reporting a failed forced submit as a CLI error."""
+    sp = rich_spinner()
+    with sp:
+        sp.add_task(label)
+        try:
+            return module(**kwargs)
+        except _agent_errors() as err:
+            raise _agent_failure(err, start) from err
 
 
 # ── react ────────────────────────────────────────────────────────────────
@@ -385,6 +689,29 @@ def run_cot(
 @click.option("--lm", help="LM model to use")
 @click.option("--temperature", type=float, default=0.2)
 @click.option("--max-tokens", type=int, default=4096)
+@click.option(
+    "--resume-history",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Resume from a saved ReAct history JSON (replays conversation evidence "
+        "only; live tool state is not restored)"
+    ),
+)
+@click.option(
+    "--no-save-history",
+    is_flag=True,
+    help="Do not auto-save this run's history JSON",
+)
+@click.option(
+    "--parallel-tools",
+    is_flag=True,
+    default=False,
+    help=(
+        "Let one agent turn issue several tool calls (native function calling "
+        "required); off by default"
+    ),
+)
 def run_react(
     signature: str,
     inputs: tuple[str, ...],
@@ -393,6 +720,9 @@ def run_react(
     lm: str | None,
     temperature: float,
     max_tokens: int,
+    resume_history: Path | None,
+    no_save_history: bool,
+    parallel_tools: bool,
 ):
     """Run a ReAct agent with tools.  Tools format: ``"server:tool_name"``
     from ``.mcp.json``, or ``module.attr`` (e.g. ``math.sqrt``)."""
@@ -403,19 +733,30 @@ def run_react(
     if tools:
         info(f"Tools: [bold]{', '.join(tools)}[/]")
     info(f"Max iters: [{_DIM}]{max_iters}[/]")
+    if parallel_tools:
+        info("Parallel tool calls: [bold]on[/]")
+
+    # Load before configuring the LM so a bad file fails fast and cleanly.
+    history = _load_agent_history(resume_history)
 
     t0 = time.time()
     setup_dspy(model=lm, temperature=temperature, max_tokens=max_tokens)
     dspy_tools = _load_tools(tools)
     kwargs = _parse_inputs(inputs)
+    if history is not None:
+        kwargs["history"] = history
 
-    sp = rich_spinner()
-    with sp:
-        sp.add_task("Thinking...")
-        result = dspy.ReAct(signature, tools=dspy_tools, max_iters=max_iters)(**kwargs)
+    with _parallel_tools_context(parallel_tools):
+        result = _run_agent(
+            dspy.ReAct(signature, tools=dspy_tools, max_iters=max_iters),
+            kwargs,
+            start=t0,
+        )
 
     _show_answer(result)
     _show_react_trace(result)
+    if not no_save_history:
+        _save_agent_history(getattr(result, "history", None), kind="react")
     _show_timing(t0)
 
 
@@ -430,6 +771,15 @@ def run_react(
 @click.option("--lm", help="LM model to use")
 @click.option("--temperature", type=float, default=0.2)
 @click.option("--max-tokens", type=int, default=4096)
+@click.option(
+    "--parallel-tools",
+    is_flag=True,
+    default=False,
+    help=(
+        "Let one agent turn issue several tool calls (native function calling "
+        "required); off by default"
+    ),
+)
 def run_react_v2(
     signature: str,
     inputs: tuple[str, ...],
@@ -438,6 +788,7 @@ def run_react_v2(
     lm: str | None,
     temperature: float,
     max_tokens: int,
+    parallel_tools: bool,
 ):
     """Run the structured ReAct agent with tools (legacy command name).
 
@@ -453,6 +804,8 @@ def run_react_v2(
     if tools:
         info(f"Tools: [bold]{', '.join(tools)}[/]")
     info(f"Max iters: [{_DIM}]{max_iters}[/]")
+    if parallel_tools:
+        info("Parallel tool calls: [bold]on[/]")
 
     t0 = time.time()
     setup_dspy(model=lm, temperature=temperature, max_tokens=max_tokens)
@@ -460,21 +813,8 @@ def run_react_v2(
     kwargs = _parse_inputs(inputs)
 
     agent = dspy.ReAct(signature, tools=dspy_tools, max_iters=max_iters)
-
-    sp = rich_spinner()
-    with sp:
-        sp.add_task("Thinking...")
-        try:
-            result = agent(**kwargs)
-        except ValueError as err:
-            # 3.5 raises when the forced submit yields no usable outputs.
-            # Surface it instead of guessing an answer from the raw LM text.
-            rich_panel("ReAct failed", str(err), border_style=_ERROR)
-            last_reply = _extract_reply_from_lm_history()
-            if last_reply:
-                rich_panel("Last model output", last_reply, border_style=_YELLOW)
-            _show_timing(t0)
-            raise click.ClickException(str(err)) from err
+    with _parallel_tools_context(parallel_tools):
+        result = _run_agent(agent, kwargs, start=t0)
 
     _show_answer(result)
     _show_react_trace(result)
@@ -604,7 +944,7 @@ def run_flex(
 
     t0 = time.time()
     setup_dspy(model=lm, temperature=temperature, max_tokens=max_tokens)
-    dspy_tools = _load_tools(tools)
+    dspy_tools = _sanitize_tool_names(_load_tools(tools))
     kwargs = _parse_inputs(inputs)
 
     sp = rich_spinner()
@@ -707,7 +1047,7 @@ def run_code_act(
     t0 = time.time()
     setup_dspy(model=lm)
     kwargs = _parse_inputs(inputs)
-    dspy_tools = _load_tools(tools)
+    dspy_tools = _sanitize_tool_names(_load_tools(tools))
 
     sp = rich_spinner()
     with sp:
@@ -726,12 +1066,12 @@ def run_code_act(
 # ── rlm ──────────────────────────────────────────────────────────────────
 
 
-def _load_rlm_history(path: Path | None) -> dspy.History | None:
-    """Load a saved RLM history for replay.
+def _load_agent_history(path: Path | None) -> dspy.History | None:
+    """Load a saved agent history (RLM or ReAct) for replay.
 
-    History replays conversation evidence only — live Python variables are
-    not restored — and the loaded object is passed as the ``history`` input
-    without being modified. A bad file raises a clean CLI error.
+    History replays conversation evidence only — live Python variables and tool
+    state are not restored — and the loaded object is passed as the ``history``
+    input without being modified. A bad file raises a clean CLI error.
     """
     if path is None:
         return None
@@ -743,21 +1083,21 @@ def _load_rlm_history(path: Path | None) -> dspy.History | None:
     return history
 
 
-def _save_rlm_history(history: Any) -> None:
-    """Persist an RLM ``History`` as JSON for later ``--resume-history``.
+def _save_agent_history(history: Any, *, kind: str = "rlm") -> None:
+    """Persist an agent ``History`` as JSON for later ``--resume-history``.
 
-    ``run rlm`` keeps no run directory, so the file lands flat in the toolkit's
-    data dir — where the command's other one-off runtime state lives. Empty
+    These commands keep no run directory, so the file lands flat in the
+    toolkit's data dir — where their other one-off runtime state lives. Empty
     histories are skipped, and a write failure warns instead of failing an
     otherwise successful run.
     """
     if not getattr(history, "messages", None):
         return
-    path = data_dir() / f"rlm_history_{datetime.now():%Y%m%d_%H%M%S}.json"
+    path = data_dir() / f"{kind}_history_{datetime.now():%Y%m%d_%H%M%S}.json"
     try:
         path.write_text(history.model_dump_json(), encoding="utf-8")
     except (OSError, ValueError) as err:
-        warn(f"could not save RLM history: {err}")
+        warn(f"could not save {kind.upper()} history: {err}")
         return
     info(f"History: [{_DIM}]{path}[/]  resume with --resume-history {path}")
 
@@ -814,12 +1154,12 @@ def run_rlm(
         info(f"Interpreter pool: [{_DIM}]{interpreter_pool_size}[/]")
 
     # Load before configuring the LM so a bad file fails fast and cleanly.
-    history = _load_rlm_history(resume_history)
+    history = _load_agent_history(resume_history)
 
     t0 = time.time()
     setup_dspy(model=lm, temperature=0.2, max_tokens=4096)
     kwargs = _parse_inputs(inputs)
-    dspy_tools = _load_tools(tools)
+    dspy_tools = _sanitize_tool_names(_load_tools(tools))
     sub_lm_obj = LMRegistry.get(model=sub_lm, temperature=0.0) if sub_lm else None
     if history is not None:
         kwargs["history"] = history
@@ -838,46 +1178,160 @@ def run_rlm(
         )(**kwargs)
 
     _show_answer(result)
-    _save_rlm_history(getattr(result, "history", None))
+    _save_agent_history(getattr(result, "history", None), kind="rlm")
     _show_timing(t0)
 
 
-# ── best-of-n ────────────────────────────────────────────────────────────
+# ── best-of-n / refine ───────────────────────────────────────────────────
+
+
+def _reward_fn(
+    keyword: str | None, scored: list[float]
+) -> Callable[[dict, Any], float]:
+    """Structural reward: every declared output field is non-empty.
+
+    ``BestOfN``/``Refine`` break as soon as ``reward >= threshold``, so a
+    constant reward ends sampling after one attempt. This reward is honest by
+    construction: ``0.0`` for a missing/empty answer, ``1.0`` for a complete
+    one, plus the optional ``--require-keyword`` quality gate. Every call is
+    recorded in ``scored`` so the real attempt count can be reported.
+    """
+
+    def reward(_args: dict, pred: Any) -> float:
+        values: list[str] = []
+        if pred is not None:
+            values = [
+                str(getattr(pred, name, "") or "").strip()
+                for name in _result_fields(pred)
+            ]
+        passed = bool(values) and all(values)
+        if passed and keyword:
+            passed = any(keyword.lower() in value.lower() for value in values)
+        value = 1.0 if passed else 0.0
+        scored.append(value)
+        return value
+
+    return reward
+
+
+def _effective_threshold(threshold: float, keyword: str | None) -> tuple[float, bool]:
+    """Return the threshold to use and whether early exit is meaningful.
+
+    Without ``--require-keyword`` the only signal is structure, which any
+    well-formed answer satisfies — so early exit would stop after the first
+    sample and make ``-n`` a lie. Disable it by making the threshold
+    unreachable, and say so in the output.
+    """
+    if keyword:
+        return threshold, True
+    return max(threshold, 1.01), False
+
+
+def _run_sampler(
+    kind: str,
+    signature: str,
+    kwargs: dict[str, Any],
+    *,
+    n: int,
+    threshold: float,
+    keyword: str | None,
+    fail_count: int | None,
+) -> Any:
+    """Run ``BestOfN``/``Refine`` with the structural reward and report attempts."""
+    effective, early_exit = _effective_threshold(threshold, keyword)
+    if early_exit:
+        info(
+            f"Quality signal: [{_DIM}]--require-keyword {keyword!r}[/]   "
+            f"Threshold: [{_DIM}]{effective}[/]"
+        )
+    else:
+        info(
+            f"Quality signal: [{_DIM}]none (--require-keyword not set)[/]   "
+            f"Threshold: [{_DIM}]{effective}[/]"
+        )
+        info(f"Early exit disabled: running all [bold]{n}[/] attempts")
+
+    scored: list[float] = []
+    reward = _reward_fn(keyword, scored)
+    sampler_cls = dspy.BestOfN if kind == "best-of-n" else dspy.Refine
+    extra = {"fail_count": fail_count} if fail_count is not None else {}
+    sampler = sampler_cls(
+        module=dspy.ChainOfThought(signature),
+        N=n,
+        threshold=effective,
+        reward_fn=reward,
+        **extra,
+    )
+
+    label = f"Sampling {n}x..." if kind == "best-of-n" else f"Refining ({n} rounds)..."
+    sp = rich_spinner()
+    with sp:
+        sp.add_task(label)
+        result = sampler(**kwargs)
+
+    best = max(scored, default=0.0)
+    info(f"Attempts: [bold]{len(scored)}/{n}[/]   Best reward: [{_DIM}]{best:.2f}[/]")
+    if result is None:
+        raise click.ClickException(f"{kind}: all {n} attempts failed")
+    return result
 
 
 @run_cmd.command(name="best-of-n", cls=LLMCommand)
 @click.argument("signature")
 @click.option("--inputs", "-i", multiple=True, help="Inputs as KEY=VALUE")
 @click.option("--samples", "-n", default=5, type=int, help="Number of samples")
-@click.option("--threshold", default=0.8, type=float)
+@click.option(
+    "--threshold",
+    default=0.8,
+    type=float,
+    help=(
+        "Reward needed for early exit. With --require-keyword this is a real "
+        "quality gate; without it early exit is disabled and all N run"
+    ),
+)
+@click.option(
+    "--require-keyword",
+    default=None,
+    help=(
+        "Only count an attempt as a success when this keyword appears in an "
+        "output field (enables early exit at --threshold)"
+    ),
+)
+@click.option(
+    "--fail-count",
+    type=int,
+    default=None,
+    help="Raise after this many failed attempts (default: --samples)",
+)
 @click.option("--lm", help="LM model to use")
 def run_best_of_n(
     signature: str,
     inputs: tuple[str, ...],
     samples: int,
     threshold: float,
+    require_keyword: str | None,
+    fail_count: int | None,
     lm: str | None,
 ):
     """Run a BestOfN module (sample N times, pick best)."""
     _show_command_header("best-of-n")
     _show_inputs(_parse_inputs(inputs))
     _show_model_info(lm)
-    info(f"Samples: [bold]{samples}[/]   Threshold: [{_DIM}]{threshold}[/]")
+    info(f"Samples: [bold]{samples}[/]")
 
     t0 = time.time()
     setup_dspy(model=lm)
     kwargs = _parse_inputs(inputs)
 
-    sp = rich_spinner()
-    with sp:
-        sp.add_task(f"Sampling {samples}x...")
-        module = dspy.ChainOfThought(signature)
-        result = dspy.BestOfN(
-            module=module,
-            N=samples,
-            threshold=threshold,
-            reward_fn=lambda args, pred: 1.0 if pred else 0.0,
-        )(**kwargs)
+    result = _run_sampler(
+        "best-of-n",
+        signature,
+        kwargs,
+        n=samples,
+        threshold=threshold,
+        keyword=require_keyword,
+        fail_count=fail_count,
+    )
 
     _show_answer(result)
     _show_timing(t0)
@@ -890,35 +1344,58 @@ def run_best_of_n(
 @click.argument("signature")
 @click.option("--inputs", "-i", multiple=True, help="Inputs as KEY=VALUE")
 @click.option("--rounds", "-n", default=5, type=int, help="Refinement rounds")
-@click.option("--threshold", default=0.8, type=float)
+@click.option(
+    "--threshold",
+    default=0.8,
+    type=float,
+    help=(
+        "Reward needed for early exit. With --require-keyword this is a real "
+        "quality gate; without it early exit is disabled and all N run"
+    ),
+)
+@click.option(
+    "--require-keyword",
+    default=None,
+    help=(
+        "Only count an attempt as a success when this keyword appears in an "
+        "output field (enables early exit at --threshold)"
+    ),
+)
+@click.option(
+    "--fail-count",
+    type=int,
+    default=None,
+    help="Raise after this many failed attempts (default: --rounds)",
+)
 @click.option("--lm", help="LM model to use")
 def run_refine(
     signature: str,
     inputs: tuple[str, ...],
     rounds: int,
     threshold: float,
+    require_keyword: str | None,
+    fail_count: int | None,
     lm: str | None,
 ):
     """Run a Refine module (iterative improvement with feedback)."""
     _show_command_header("refine")
     _show_inputs(_parse_inputs(inputs))
     _show_model_info(lm)
-    info(f"Rounds: [bold]{rounds}[/]   Threshold: [{_DIM}]{threshold}[/]")
+    info(f"Rounds: [bold]{rounds}[/]")
 
     t0 = time.time()
     setup_dspy(model=lm)
     kwargs = _parse_inputs(inputs)
 
-    sp = rich_spinner()
-    with sp:
-        sp.add_task(f"Refining ({rounds} rounds)...")
-        module = dspy.ChainOfThought(signature)
-        result = dspy.Refine(
-            module=module,
-            N=rounds,
-            threshold=threshold,
-            reward_fn=lambda args, pred: 1.0 if pred else 0.0,
-        )(**kwargs)
+    result = _run_sampler(
+        "refine",
+        signature,
+        kwargs,
+        n=rounds,
+        threshold=threshold,
+        keyword=require_keyword,
+        fail_count=fail_count,
+    )
 
     _show_answer(result)
     _show_timing(t0)
@@ -955,12 +1432,24 @@ def run_multi_chain(
         sp.add_task(f"Generating {chains} reasoning chains...")
         judge = dspy.MultiChainComparison(signature, M=chains, temperature=temperature)
         predictor = dspy.ChainOfThought(signature, temperature=temperature)
+        # Identical inputs at identical config are a cache hit: without a
+        # distinct rollout id the judge would compare M copies of one draft.
+        lm_obj = dspy.settings.lm
         completions: list = []
         for i in range(chains):
-            completions.append(predictor(**kwargs))
+            rollout = lm_obj.copy(rollout_id=i) if lm_obj is not None else None
+            context = dspy.context(lm=rollout) if rollout is not None else nullcontext()
+            with context:
+                completions.append(predictor(**kwargs))
         if not completions:
             fail("All chain attempts failed")
             raise click.ClickException("all M completion attempts failed")
+        drafts = {repr(completion) for completion in completions}
+        if len(drafts) < len(completions):
+            warn(
+                f"Only {len(drafts)}/{len(completions)} drafts differ after "
+                f"distinct rollout ids — the judge is comparing near-duplicates"
+            )
         try:
             result = judge(completions, **kwargs)
         except (RuntimeError, ValueError, KeyError, TypeError) as e:
@@ -971,7 +1460,7 @@ def run_multi_chain(
         parts = [
             getattr(result, fname, "")
             for fname in _result_fields(result)
-            if getattr(result, fname, "") and fname != "rationale"
+            if getattr(result, fname, "")
         ]
         rich_panel("Best Answer", "\n".join(parts), border_style=_RESULT)
     else:
@@ -1047,10 +1536,22 @@ def run_parallel(
             num_threads=len(modules),
             timeout=timeout,
             straggler_limit=straggler_limit,
+            return_failed_examples=True,
         )
-        result = parallel(exec_pairs)
+        results, failed_examples, exceptions = parallel(exec_pairs)
 
-    _show_result(result, title="Parallel Results")
+    successes = [item for item in results if item is not None]
+    if failed_examples:
+        fail(f"{len(failed_examples)}/{len(exec_pairs)} modules failed")
+        for example, error in zip(failed_examples, exceptions, strict=False):
+            warn(f"{type(error).__name__}: {error} — inputs {dict(example.inputs())}")
+        if not successes:
+            raise click.ClickException(
+                f"all {len(exec_pairs)} modules failed; see the errors above"
+            )
+        warn(f"Showing the {len(successes)} module(s) that completed")
+
+    _show_result(successes, title="Parallel Results")
     _show_timing(t0)
 
 
@@ -1093,6 +1594,22 @@ def run_retrieve(query: str, k: int, url: str):
 # ── cot-hint ─────────────────────────────────────────────────────────────
 
 
+def _cot_with_hint(signature: Any, hint: str | None) -> Any:
+    """Build a ChainOfThought whose instructions include ``hint``.
+
+    There is no ``ChainOfThoughtWithHint`` in DSPy 3.5, so the hint is layered
+    on with ``append_instructions`` — a *new* signature class. The task
+    docstring survives, the caller's signature class is never mutated, and a
+    reused module cannot keep the hint.
+    """
+    module = dspy.ChainOfThought(signature)
+    if not hint or module.predict is None or module.predict.signature is None:
+        return module
+    hinted = module.predict.signature.append_instructions(f"Hint: {hint}")
+    module.predict = dspy.Predict(hinted)
+    return module
+
+
 @run_cmd.command(name="cot-hint", cls=LLMCommand)
 @click.argument("signature")
 @click.option("--inputs", "-i", multiple=True, help="Inputs as KEY=VALUE")
@@ -1115,10 +1632,7 @@ def run_cot_hint(
     sp = rich_spinner()
     with sp:
         sp.add_task("Thinking with hint...")
-        # dspy has no ChainOfThoughtWithHint — inject the hint via instructions
-        module = dspy.ChainOfThought(signature)
-        if hint and module.predict is not None and module.predict.signature is not None:
-            module.predict.signature.instructions = f"Hint: {hint}"
+        module = _cot_with_hint(signature, hint)
         result = module(**kwargs)
 
     _show_answer(result)

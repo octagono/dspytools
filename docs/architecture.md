@@ -17,7 +17,7 @@ dspytools/
 │   ├── doctor.py            System diagnostics (env, GPU, deps, config)
 │   ├── lora.py              LoRA adapter management (load, unload, list, chat, test, health, discover)
 │   └── ...
-├── core/ (16 files)         Engine
+├── core/ (21 files)         Engine
 │   ├── _dspy.py             Lazy DSPy import
 │   ├── setup.py             LMRegistry singleton + setup_dspy
 │   ├── hotswap.py           LRU cache HotSwapManager (refcounting, warm_swap, drain-safe swap)
@@ -30,8 +30,9 @@ dspytools/
 │   ├── holdout.py           Holdout isolation gate (Invariant 5)
 │   ├── loaders.py           Trainset/module/JSONL load helpers
 │   ├── metrics.py           Shared DSPy metric factories (SSOT)
+│   ├── programs.py          Compiled-program provenance (DSPy version guard)
 │   ├── retry.py             Auto-retry with exponential backoff
-│   └── errors.py            Typed exception hierarchy
+│   ├── errors.py            Typed exception hierarchy
 │   ├── mojo_bridge.py       Shared Mojo module loader (try_load_mojo)
 │   └── logging_config.py    Centralized structlog structured logging
 ├── gfl/ (15 files)          Generative Feedback Loop
@@ -123,9 +124,19 @@ graph TD
 
 ## Cost Tracking
 
-`core/cost_tracker.py` tracks LM token usage and cost per call. Every compile and inference is logged with:
-- Input/output tokens per model
-- Estimated dollar cost (configurable per-model pricing)
+`core/cost_tracker.py` tracks LM token usage and cost per call. Two paths exist:
+
+- **Measured** (preferred): DSPy's own accounting. `setup_dspy()` enables
+  `track_usage` by default, `Usage.from_usage()` / `add_result()` read
+  `Prediction.get_lm_usage()` or `lm.history[-1]["usage"|"cost"]`. Cached calls
+  report no usage and are skipped rather than counted as zero-cost work.
+- **Estimated** (`estimate()` / `add_call()`): the original heuristic, kept for
+  callers with no LM history.
+
+Every compile and inference is logged with:
+- Input/output tokens per model, plus `measured_calls` vs `estimated_calls`
+- Dollar cost — the provider's reported `cost` when present, otherwise
+  configurable per-model pricing
 - Aggregated stats per `run_id` and per pipeline step
 
 Access via `dspytools compile cost <run-id>` or the `compile_cost` MCP tool.

@@ -19,7 +19,9 @@ hide the async machinery from DSPy.
 from __future__ import annotations
 
 import asyncio
+import keyword
 import os
+import re
 import sys
 import threading
 import time
@@ -137,6 +139,7 @@ class MCPSessionPool:
 
         async def _connect() -> list[dspy.Tool]:
             all_tools: list[dspy.Tool] = []
+            taken_names: set[str] = set()
 
             for name, server_cfg in servers.items():
                 server_params = StdioServerParameters(
@@ -159,6 +162,7 @@ class MCPSessionPool:
                             description=mcp_tool.description or "",
                             input_schema=mcp_tool.inputSchema or {},
                             session=session,
+                            taken_names=taken_names,
                         )
                         all_tools.append(tool)
 
@@ -201,12 +205,17 @@ def _make_sync_tool(
     description: str,
     input_schema: dict[str, Any],
     session: Any,
+    taken_names: set[str] | None = None,
 ) -> dspy.Tool:
     """Create a dspy.Tool that calls an MCP session tool synchronously.
 
     The returned tool's __call__ dispatches session.call_tool() on the
     dedicated MCP event loop thread, avoiding ClosedResourceError from
     DSPy's asyncio.run() creating a new loop.
+
+    The advertised name is sanitized to a valid Python identifier (see
+    `_sanitize_tool_name`); the original MCP name is preserved in the tool
+    description and is the name actually sent over the wire.
     """
     pool = MCPSessionPool()
     loop = pool._get_loop()
@@ -222,32 +231,82 @@ def _make_sync_tool(
             return "\n".join(texts) if texts else str(result)
         return str(result)
 
-    # Build DSPy Tool
-    args = _json_schema_to_args(input_schema)
+    # Build DSPy Tool — DSPy's own converter preserves descriptions and the
+    # JSON-schema fragments (nested objects, anyOf, ...) that a hand-rolled
+    # {name: {type}} mapping would drop.
+    args, arg_types, arg_desc = _schema_to_tool_args(input_schema)
+    tool_name = _sanitize_tool_name(name, taken_names)
+    if tool_name != name:
+        description = f"{description}\n\nMCP tool name: {name}".strip()
     return dspy.Tool(
         _call,
-        name=name,
+        name=tool_name,
         desc=description,
         args=args,
+        arg_types=arg_types,
+        arg_desc=arg_desc,
     )
 
 
-def _json_schema_to_args(schema: dict[str, Any]) -> dict[str, dict[str, str]]:
-    """Convert JSON Schema properties to DSPy Tool's simple args format.
+def _schema_to_tool_args(
+    schema: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
+    """Convert an MCP input JSON Schema into DSPy Tool ``args``/``arg_types``/``arg_desc``.
 
-    DSPy's Tool.args expects {name: {type: str}}.
+    DSPy's `convert_input_schema_to_tool_args` keeps each property's schema
+    (description, default, nested pieces) and types, but it does not encode
+    optionality: `dspy.Tool.as_function_tool()` derives JSON-schema
+    ``required`` from the *absence* of a ``"default"`` key on the arg. So every
+    property the server did not list in ``required`` gets a ``default`` key
+    (the schema's own default when present, else ``None``) — otherwise an
+    optional MCP argument is advertised to the model as mandatory.
     """
-    if not schema:
-        return {}
-    props = schema.get("properties", schema) if isinstance(schema, dict) else {}
-    args: dict[str, dict[str, str]] = {}
-    for pname, pinfo in props.items():
-        if isinstance(pinfo, dict):
-            js_type = pinfo.get("type", "string")
-            args[pname] = {"type": js_type}
-        else:
-            args[pname] = {"type": "string"}
-    return args
+    from dspy.adapters.types.tool import convert_input_schema_to_tool_args
+
+    schema = schema or {}
+    args, arg_types, arg_desc = convert_input_schema_to_tool_args(schema)
+    required = schema.get("required") or []
+    for pname, prop in list(args.items()):
+        if pname in required or not isinstance(prop, dict):
+            continue
+        if "default" not in prop:
+            args[pname] = {**prop, "default": None}
+    return args, arg_types, arg_desc
+
+
+def _sanitize_tool_name(raw_name: str, taken_names: set[str] | None = None) -> str:
+    """Return a collision-free, valid Python identifier for an MCP tool name.
+
+    MCP servers expose names that are not valid identifiers (``git-mcp_list_files``).
+    ``dspy.ReAct`` tolerates those, but ``dspy.RLM``/``dspy.Flex`` raise
+    `ValueError: Invalid tool name ...` for anything that fails
+    ``str.isidentifier()`` or is a keyword. Deterministic rules:
+
+    1. non-alphanumeric/underscore characters → ``_``
+    2. empty result → ``"tool"``
+    3. leading digit → prefix ``_``
+    4. Python keyword → suffix ``_``
+    5. collision with an already-taken name → suffix ``_2``, ``_3``, ...
+
+    ``taken_names`` is updated in place. The original name stays visible to the
+    model through the tool description and is what `_call` sends to the server.
+    """
+    taken = taken_names if taken_names is not None else set()
+    ident = re.sub(r"[^0-9a-zA-Z_]", "_", raw_name)
+    if not ident:
+        ident = "tool"
+    if ident[0].isdigit():
+        ident = "_" + ident
+    if keyword.iskeyword(ident):
+        ident = ident + "_"
+
+    base = ident
+    suffix = 2
+    while ident in taken:
+        ident = f"{base}_{suffix}"
+        suffix += 1
+    taken.add(ident)
+    return ident
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────

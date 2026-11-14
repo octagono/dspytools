@@ -66,7 +66,7 @@ Files are independent — no circular imports. `__init__.py` aggregates; all oth
   - Returns `dspy.Code` and `dspy.Image` primitives on the history to demonstrate DSPy multimodal types
 - `load_mcp_tools_sync() → tuple[list, list[dspy.Tool]]`:
   - Reads `.mcp.json` from `Path.cwd()`
-  - Creates sessions via `MCPSessionPool` from `dspytools.mcp.loader`
+  - Discovers tools with `MCPSessionPool().get_tools(str(mcp_config_path))` — the same conversion path the MCP server/CLI use; there is no `create_session` API on the pool. Sessions are read from `pool._sessions` for the returned tuple.
   - Returns empty lists if `.mcp.json` is missing, malformed, or has no servers
   - Never raises — all exceptions caught and return `([], [])`
 - `GitRepoExplorer`:

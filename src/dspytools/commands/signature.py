@@ -11,7 +11,6 @@ import re
 from dspytools.cli.rich_config import LLMCommand, LLMGroup, click
 from dspytools.core.registry import delete_signature, list_signatures
 from dspytools.core.setup import setup_dspy
-from dspytools.generators import SignatureGeneratorDSPy
 
 # ---------------------------------------------------------------------------
 # CLI Commands
@@ -81,7 +80,10 @@ def signature_new(
             f"and from dspytools.core._dspy import dspy."
         )
 
-    # Run the DSPy generator module
+    # Run the DSPy generator module. Imported here because the generator is a
+    # real dspy.Module subclass, so importing it materialises dspy.
+    from dspytools.generators import SignatureGeneratorDSPy
+
     gen = SignatureGeneratorDSPy()
     code, field_count, warnings = gen.generate(prompt, name, instructions)
 

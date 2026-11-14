@@ -18,6 +18,27 @@ from dspytools.core.logging_config import get_logger
 _log = get_logger(__name__)
 
 
+def _signature_from_trainset(trainset: list) -> dict:
+    """Derive ``{"inputs": [...], "outputs": [...]}`` from the first example.
+
+    Describes the data the drift-fix run was actually compiled on instead of
+    hardcoding an ``input``/``output`` shape the program may not have.
+    """
+    if not trainset:
+        return {"inputs": ["input"], "outputs": ["output"]}
+    first = trainset[0]
+    if hasattr(first, "toDict"):
+        fields = list(first.toDict())
+    else:
+        fields = [k for k in vars(first) if not k.startswith("_")]
+    if hasattr(first, "inputs"):
+        inputs = list(first.inputs())
+    else:
+        inputs = fields[:1]
+    outputs = [f for f in fields if f not in inputs] or ["output"]
+    return {"inputs": inputs, "outputs": outputs}
+
+
 @dataclass
 class DriftSnapshot:
     """A single quality check for a compiled program."""
@@ -66,7 +87,43 @@ class DriftMonitor:
         self._baselines: dict[str, float] = {}
         self._history: dict[str, list[DriftSnapshot]] = {}
         self._recompile_requests: set[str] = set()
+        # Real trainsets registered per run_id. Drift auto-fix MUST recompile
+        # against actual data — see process_recompile_requests(). In-memory
+        # only: trainsets are not part of the JSON state file.
+        self._trainsets: dict[str, list] = {}
         self._load_state()
+
+    def register_trainset(self, run_id: str, trainset: list) -> None:
+        """Register the real trainset a run was (or should be) compiled on.
+
+        Required for drift auto-fix: ``process_recompile_requests(auto_fix=True)``
+        refuses to recompile a run with no registered trainset.
+        """
+        examples = list(trainset or [])
+        if not examples:
+            raise ValueError(f"trainset for '{run_id}' is empty")
+        self._trainsets[run_id] = examples
+
+    def get_trainset(self, run_id: str) -> list | None:
+        """Registered trainset for a run, or None."""
+        return self._trainsets.get(run_id)
+
+    def _resolve_trainset(self, run_id: str, meta: dict) -> list | None:
+        """Find the trainset for a run: registered in memory, else metadata path."""
+        registered = self._trainsets.get(run_id)
+        if registered:
+            return registered
+
+        for key in ("trainset", "trainset_path", "dataset", "dataset_path"):
+            candidate = meta.get(key)
+            if isinstance(candidate, str) and Path(candidate).is_file():
+                from dspytools.core.loaders import load_trainset
+
+                loaded = load_trainset(candidate)
+                if loaded:
+                    self._trainsets[run_id] = loaded
+                    return loaded
+        return None
 
     def update_baseline(self, run_id: str, score: float) -> None:
         """Set or update the baseline quality for a program."""
@@ -211,9 +268,7 @@ class DriftMonitor:
                 continue
 
             # Attempt auto-recompile via GFLPipeline
-            from dspytools.core.loaders import load_module_by_name
             from dspytools.core.registry import get_run
-            from dspytools.gfl.pipeline import GFLPipeline
 
             meta = get_run(run_id)
             if not meta:
@@ -226,16 +281,33 @@ class DriftMonitor:
                 )
                 continue
 
+            # Drift auto-fix must compile against the run's real data. There is
+            # deliberately no fabricated fallback: optimizing on a one-line
+            # placeholder produces an artifact that is worse than the degraded
+            # one it replaces, then hot-swaps it into service.
+            trainset = self._resolve_trainset(run_id, meta)
+            if not trainset:
+                _log.warning("drift_fix_trainset_missing", run_id=run_id)
+                results.append(
+                    {
+                        "run_id": run_id,
+                        "status": "skipped",
+                        "action": (
+                            f"no trainset registered for '{run_id}' — drift auto-fix "
+                            "refuses to recompile against a fabricated example. "
+                            "Re-run the original compile with an explicit "
+                            "`--trainset` (which registers the dataset) or call "
+                            "`DriftMonitor.register_trainset(run_id, trainset)`."
+                        ),
+                    }
+                )
+                continue
+
+            from dspytools.core.loaders import load_module_by_name
+            from dspytools.gfl.pipeline import GFLPipeline
+
             module_name = meta.get("module", "unknown")
             student = load_module_by_name(module_name)
-
-            from dspytools.core._dspy import dspy
-
-            default_trainset = [
-                dspy.Example(
-                    input="generate code output", output="code example"
-                ).with_inputs("input"),
-            ]
 
             history = self._history.get(run_id, [])
             baseline = self._baselines.get(run_id, 0.5)
@@ -256,7 +328,7 @@ class DriftMonitor:
             if use_draft:
                 compile_result = pipeline.compile_draft(
                     student=student,
-                    trainset=default_trainset,
+                    trainset=trainset,
                     optimizer_name=suggested,
                     draft_rounds=2,
                     polish_rounds=1,
@@ -266,7 +338,7 @@ class DriftMonitor:
                 compile_result = pipeline.run_single(
                     optimizer_name=suggested,
                     student=student,
-                    trainset=default_trainset,
+                    trainset=trainset,
                     auto_synthesize=True,
                     auto_meta=True,
                     min_examples=5,
@@ -281,7 +353,7 @@ class DriftMonitor:
             save_program(
                 run_path,
                 compile_result.get("best_program", student),
-                {"inputs": ["input"], "outputs": ["output"]},
+                _signature_from_trainset(trainset),
                 module_type="predict",
             )
 

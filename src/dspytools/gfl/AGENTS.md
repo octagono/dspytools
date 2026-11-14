@@ -17,7 +17,8 @@ The GFL (Generative Feedback Loop) directory implements the full self-meta-learn
 - `ABTest` — statistical A/B testing for compiled programs (win-rate with confidence threshold). Used by hot-swap deploy pipeline.
 - `TaskDecomposer` — Self-Discover style decomposition into DSPy sub-modules. Used by `self evolve`.
 - `SkillConsolidator` — Trace2Skill pattern mining from execution trajectories (arXiv 2603.25158). 3-stage pipeline: Rollout → Analyze → Consolidate. Outputs skills to `~/.config/dspytools/skills/`. Used by `GFLPipeline._consolidate_trajectories()` automatically after each `run()` and `run_halving()`.
-- `generate_feedback` — scalar scores → structured diagnostic text for GEPA's `reflection_lm`.
+- `generate_feedback` — scalar scores → structured diagnostic text for GEPA's `reflection_lm`. (Not used by `_evaluate`, which now scores the real metric.)
+- `grpo.py` — `compile_grpo()` adapter for `dspy.teleprompt.grpo.GRPO`: maps `max_steps`→`num_train_steps`, drops the removed `lora`/`beta` kwargs, and needs an `LM.finetune()`-capable provider.
 - `ResourceBudget` — hard limits on LLM calls, wall time, agents, and iterations. Prevents runaway costs in autonomous operation. Used by pipeline for pre-flight checks.
 
 ## Local Contracts
@@ -26,7 +27,8 @@ The GFL (Generative Feedback Loop) directory implements the full self-meta-learn
 - `GFLPipeline(student, trainset, train_field, val_field)` → `{best_optimizer, best_program, best_score, baseline, improvement, all_scores, budget, trend, total_improvement}`
 - **SPRT post-compile validation**: Holdout is split via `HoldoutGate.split()` BEFORE any optimizer runs (Invariant 5: optimizer never sees holdout). After the best optimizer is selected, the pipeline runs `SelfEvolveEngine.validate_and_deploy()` (SPRT, p0=0.50, p1=0.65, α=0.05, β=0.20) on that holdout set. Result includes `{validation: {accepted, score, p_value, n_evaluated, early_stop}}`. If SPRT rejects the best candidate, the pipeline falls back to the baseline program (fail-safe, never deploys a regressor).
 - Runs 4 optimizers in order: BootstrapFewShot → MIPROv2 → GEPA → Sequential (BetterTogether)
-- Each optimizer receives a fresh `metric` function that compares `val_field` between prediction and gold
+- Each optimizer receives a fresh `metric` function that compares `val_field` between prediction and gold. BootstrapFewShot keeps DSPy's demo defaults (labeled 16 / bootstrapped 4) — pinning both to 4 dropped the labeled budget.
+- GEPA's reflection metric is `gepa_metric` (`dspy.Prediction(score, feedback)`); the `BetterTogether` stage's own scorer uses `gepa_metric_float` because `dspy.Evaluate` sums metric returns.
 - GEPA and Sequential receive `reflection_lm=teacher` via `LMRegistry.get_teacher()`. With no teacher configured they raise `ValueError` (caught by the documented degraded path) rather than leaking an `AssertionError`; the Sequential/`BetterTogether` branch also compiles on a copy carrying an explicit default LM, because 3.5 asserts every predictor has one.
 - `ResourceBudget.check()` called before each optimizer — raises `RuntimeError` on budget exceeded
 - Best optimizer selected by max score across all completed optimizers
@@ -39,7 +41,8 @@ The GFL (Generative Feedback Loop) directory implements the full self-meta-learn
 ### Score contract
 - Quality scores are `0.0-1.0` float, tracked via `LSETracker`
 - Baseline measured on first 3 training examples before any optimizer
-- `_evaluate` uses `generate_feedback(prediction)["score"]`
+- `_evaluate(compiled, sample, ...)` averages `exact_match_metric` over **every** example in `sample` via `dspy.Evaluate` (returns the mean, `0-1`); `_evaluate_detailed` also returns `n_evaluated`. It used to score only `sample[0]`, so the 4-way comparison, successive-halving pruning and `gate_promotion` ranked optimizers on a single example. The heuristic `generate_feedback` scorer is no longer used for evaluation.
+- Result dicts carry `n_evaluated` alongside the score (`run()`, `run_single()`, `gate_promotion()`)
 - LSE delta = `score - baseline`, only positive deltas count toward `total_improvement`
 
 ### Teacher LM contract
@@ -146,7 +149,9 @@ All persistent state lives under `~/.config/dspytools/`:
 
 ## Verification
 
-No dedicated test suite exists yet. Verification is manual via CLI commands:
+`uv run --no-sync pytest tests/test_optimizer_integrity.py -q` covers the pipeline-side
+contracts (holdout-first split order, GRPO signature mapping). The remainder is manual
+via CLI commands:
 ```bash
 dspytools compile gfl --program test --trainset data.json
 dspytools gfl spin --module test --trainset data.json
@@ -161,7 +166,7 @@ Quality contracts to verify manually:
 - `GFLPipeline.run()` returns all expected keys
 - `ResourceBudget.check()` raises `RuntimeError` on limit breach with descriptive message
 - `LSETracker` persists and reloads from `lse_log.json`
-- `compile_grpo()` falls back gracefully if GRPO is unavailable
+- `compile_grpo()` maps `max_steps` → `num_train_steps` and passes only kwargs present in the installed `GRPO.__init__` (3.5 has no `lora`, `beta` or `max_steps`); it requires a `.finetune()`-capable LM, and callers must guard local endpoints like `compile finetune` does
 - All shared state files survive partial writes (JSON not written until fully constructed)
 
 ## Child DOX Index

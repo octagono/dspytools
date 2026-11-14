@@ -24,14 +24,13 @@ from dspytools.core._dspy import dspy
 from dspytools.core._io import try_read_json, write_json
 from dspytools.core.holdout import HoldoutGate
 from dspytools.core.logging_config import get_logger
-from dspytools.core.metrics import exact_match_metric, gepa_metric
+from dspytools.core.metrics import exact_match_metric, gepa_metric, gepa_metric_float
 from dspytools.core.mlflow_tracker import get_tracker
 from dspytools.core.retry import retry
 from dspytools.core.setup import LMRegistry
 from dspytools.evolve.self_evolve import SelfEvolveEngine
 from dspytools.gfl.budget import ResourceBudget
 from dspytools.gfl.consolidation import SkillConsolidator
-from dspytools.gfl.feedback import generate_feedback
 from dspytools.gfl.meta_learn import MetaOptimizer
 from dspytools.gfl.synthetic import DataSynthesizer
 from dspytools.gfl.tracker import LSETracker
@@ -166,6 +165,7 @@ class GFLPipeline:
             "baseline": self.tracker.baseline,
             "improvement": best_score - (self.tracker.baseline),
             "all_scores": {k: v[1] for k, v in self.results.items()},
+            "n_evaluated": len(train_data[:3]),
             "budget": self.budget.summary,
             "trend": self.tracker.improvement_trend,
             "total_improvement": self.tracker.total_improvement,
@@ -468,8 +468,11 @@ class GFLPipeline:
         """Dispatch to a single optimizer by name."""
 
         metric = exact_match_metric()
-        # GEPA requires a 5-arg metric: (gold, pred, trace, pred_name, pred_trace)
+        # GEPA's reflection loop wants a dspy.Prediction(score, feedback) metric;
+        # BetterTogether feeds its own metric to dspy.Evaluate, which sums scores,
+        # so it needs the plain-float variant.
         gepa_met = gepa_metric
+        gepa_met_float = gepa_metric_float
         # The teacher LM (DeepSeek) generates the demonstrations that train the
         # student. Without it, optimizers bootstrap with the student-as-teacher,
         # which fails for tool-use/ReAct tasks the student can't do yet.
@@ -497,12 +500,12 @@ class GFLPipeline:
 
         optimizers = {
             # metric_threshold=None keeps metric truthiness (a threshold of 0
-            # would accept every score >= 0).
+            # would accept every score >= 0). Demo caps stay at DSPy's defaults
+            # (max_labeled_demos=16, max_bootstrapped_demos=4) — pinning both to
+            # 4 dropped the documented labeled-demo budget.
             "bootstrap_few_shot": lambda: dspy.BootstrapFewShot(
                 metric=metric,
                 metric_threshold=None,
-                max_labeled_demos=4,
-                max_bootstrapped_demos=4,
             ).compile(student=student, trainset=trainset, teacher=teacher),
             "mipro": lambda: dspy.MIPROv2(metric=metric, auto="light").compile(
                 student=student, trainset=trainset, teacher=teacher
@@ -511,7 +514,7 @@ class GFLPipeline:
                 metric=gepa_met, auto="light", reflection_lm=reflection_lm
             ).compile(student=student, **self._valset_kwargs(trainset)),
             "sequential": lambda: dspy.BetterTogether(
-                metric=gepa_met,
+                metric=gepa_met_float,
                 p=dspy.GEPA(
                     metric=gepa_met,
                     auto="light",
@@ -557,19 +560,46 @@ class GFLPipeline:
         return {"trainset": trainset}
 
     @staticmethod
-    def _evaluate(compiled, sample, train_field, val_field) -> float:
-        if not sample:
-            return 0.5
-        ex = sample[0]
-        kwargs = (
-            ex.inputs()
-            if hasattr(ex, "inputs")
-            else {train_field: getattr(ex, train_field, "")}
-        )
-        result = compiled(**kwargs)
-        output = getattr(result, val_field, getattr(result, "output", str(result)))
+    def _evaluate_detailed(
+        compiled, sample, train_field, val_field
+    ) -> tuple[float, int]:
+        """Average the metric over *every* example in ``sample``.
 
-        return generate_feedback(str(output))["score"]
+        Returns ``(score, n_evaluated)``. Previously only ``sample[0]`` was
+        scored, so the 4-way comparison, successive-halving pruning and the
+        promotion gate all ranked optimizers on a single example.
+        """
+        examples = list(sample or [])
+        if not examples:
+            return 0.5, 0
+        evaluator = dspy.Evaluate(
+            devset=examples,
+            metric=exact_match_metric(val_field),
+            num_threads=1,
+            display_progress=False,
+            display_table=False,
+            max_errors=len(examples),
+            provide_traceback=False,
+            failure_score=0.0,
+        )
+        result = evaluator(compiled)
+        score = float(result.score) / 100.0
+        _log.debug(
+            "gfl_evaluate",
+            score=score,
+            n_evaluated=len(examples),
+            train_field=train_field,
+            val_field=val_field,
+        )
+        return score, len(examples)
+
+    @staticmethod
+    def _evaluate(compiled, sample, train_field, val_field) -> float:
+        """Average normalized exact-match score over ``sample`` (float only)."""
+        score, _ = GFLPipeline._evaluate_detailed(
+            compiled, sample, train_field, val_field
+        )
+        return score
 
     def compare_teacher_student(
         self,
@@ -677,8 +707,11 @@ class GFLPipeline:
         # 3. Run the optimizer
         compiled = self._dispatch_optimizer(optimizer_name, student, trainset)
 
-        # 4. Evaluate with configured field names
-        score = self._evaluate(compiled, trainset[:3], train_field, val_field)
+        # 4. Evaluate with configured field names (mean over the sample)
+        eval_sample = trainset[:3]
+        score, n_evaluated = self._evaluate_detailed(
+            compiled, eval_sample, train_field, val_field
+        )
 
         # 5. Wire to self-evolve engine
         self._evolve_engine.on_compile(
@@ -696,6 +729,7 @@ class GFLPipeline:
             "best_score": score,
             "best_program": compiled,
             "trainset_size": len(trainset),
+            "n_evaluated": n_evaluated,
             "synthesized": len(trainset) != original_len if auto_synthesize else False,
             "all_scores": {optimizer_name: score},
         }
@@ -765,12 +799,17 @@ class GFLPipeline:
         Returns:
             {promoted: bool, candidate_score, baseline_score, improvement}
         """
-        candidate_score = GFLPipeline._evaluate(candidate, holdout, "input", "output")
-        baseline_score = GFLPipeline._evaluate(baseline, holdout, "input", "output")
+        candidate_score, n_evaluated = GFLPipeline._evaluate_detailed(
+            candidate, holdout, "input", "output"
+        )
+        baseline_score, _ = GFLPipeline._evaluate_detailed(
+            baseline, holdout, "input", "output"
+        )
         improvement = candidate_score - baseline_score
         return {
             "promoted": improvement > min_improvement,
             "candidate_score": candidate_score,
             "baseline_score": baseline_score,
             "improvement": improvement,
+            "n_evaluated": n_evaluated,
         }

@@ -15,6 +15,7 @@ import re as _re
 import threading
 import time as _time
 from collections import OrderedDict, deque
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from dspytools.core.logging_config import get_logger
@@ -30,8 +31,9 @@ from dspytools.config.settings import compiled_dir
 from dspytools.core._io import read_json
 from dspytools.core.drift_monitor import get_drift_monitor
 from dspytools.core.errors import ServiceUnavailableError
-from dspytools.core.loaders import prediction_to_dict
+from dspytools.core.loaders import prediction_output, prediction_to_dict
 from dspytools.core.metrics import auto_metric
+from dspytools.core.programs import is_current_dspy_version, saved_dspy_version
 from dspytools.graph.cache import get_semantic_cache
 
 _log = get_logger(__name__)
@@ -58,7 +60,34 @@ _signature_cache: OrderedDict[str, dict] = OrderedDict()
 _MAX_CACHE = 256
 
 
-def _load_program_from_run(run_id: str) -> dspy.Module | None:
+def _json_safe(value: Any) -> Any:
+    """Convert a DSPy result value into something ``json.dumps`` accepts.
+
+    ``dspy.Reasoning`` is str-like but **not** a ``str`` subclass and not
+    JSON-serializable, so caching a ChainOfThought prediction verbatim raised
+    ``TypeError: Object of type Reasoning is not JSON serializable`` on every
+    call. Unknown value types degrade to ``str()`` instead of failing the
+    request — the cache is an optimization, never a correctness requirement.
+    """
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return str(value)
+
+
+def _json_safe_output(output: dict[str, Any]) -> dict[str, Any]:
+    """JSON-safe copy of a ``prediction_to_dict()`` payload."""
+    return {str(k): _json_safe(v) for k, v in output.items()}
+
+
+def _load_program_from_run(
+    run_id: str, run_path: Path | None = None
+) -> dspy.Module | None:
     """Load a compiled program deterministically from its metadata.
 
     Optimization 9: Reads program.json ONCE and reuses the parsed data
@@ -67,26 +96,31 @@ def _load_program_from_run(run_id: str) -> dspy.Module | None:
 
     Uses metadata.json's module_type field to pick the right DSPy class
     on first try — no Predict→ChainOfThought fallback chain.
+
+    ``run_path`` overrides the ``compiled_dir()/run_id`` lookup so callers
+    holding a run directory elsewhere (``dspytools evaluate run <path>``) load
+    the artifact in the shape it was actually saved in.
     """
-    run_path = compiled_dir() / run_id
+    run_path = Path(run_path) if run_path is not None else compiled_dir() / run_id
+    cache_key = str(run_path)
     meta_path = run_path / "metadata.json"
 
     # Optimization 17: Check metadata cache first
-    if run_id in _metadata_cache:
-        meta = _metadata_cache[run_id]
+    if cache_key in _metadata_cache:
+        meta = _metadata_cache[cache_key]
     else:
         if not meta_path.exists():
             return None
         meta = read_json(meta_path)
-        _metadata_cache[run_id] = meta
-        _metadata_cache.move_to_end(run_id)
+        _metadata_cache[cache_key] = meta
+        _metadata_cache.move_to_end(cache_key)
         if len(_metadata_cache) > _MAX_CACHE:
             _metadata_cache.popitem(last=False)
 
     sig_path = run_path / "signature.json"
 
     # Optimization 28: Check signature cache first
-    sig_cache_key = f"{run_id}:sig"
+    sig_cache_key = f"{cache_key}:sig"
     if sig_cache_key in _signature_cache:
         sig_data = _signature_cache[sig_cache_key]
     else:
@@ -103,6 +137,18 @@ def _load_program_from_run(run_id: str) -> dspy.Module | None:
     prog_path = run_path / "program.json"
     if not prog_path.exists():
         return None
+
+    # Provenance: DSPy 3.5 changed prompts, the default adapter and the
+    # canonical request path, so a program saved by another DSPy silently
+    # degrades. Warn before loading; refusing would strand existing runs.
+    if not is_current_dspy_version(prog_path):
+        _log.warning(
+            "dspy_version_mismatch",
+            run_id=run_id,
+            saved_version=saved_dspy_version(prog_path),
+            current_version=getattr(dspy, "__version__", None),
+            hint="recompile the program under the running DSPy",
+        )
 
     # Optimization 9: Read program.json ONCE, reuse for both load paths
     prog_text = prog_path.read_text()  # Fail fast on read errors
@@ -400,26 +446,36 @@ class HotSwapManager:
             result = prog(**inputs)
             output = prediction_to_dict(result)
 
-            # Semantic cache store (SSOT) — degrade to no-op when Redis is down
+            # Semantic cache store (SSOT) — degrade to no-op when Redis is down.
+            # Serialization is deliberately outside the store try/except: a
+            # value that cannot be JSON-encoded (e.g. dspy.Reasoning) is a
+            # cache miss, never an inference failure.
             if cache:
+                payload = None
                 try:
-                    # Convert ndarray values to lists for JSON serialization
-                    serializable = {
-                        k: v.tolist() if isinstance(v, np.ndarray) else v
-                        for k, v in output.items()
-                    }
-                    cache.store(
-                        cache_key, json.dumps(serializable), _vector=cache_vector
+                    payload = json.dumps(_json_safe_output(output))
+                except (TypeError, ValueError) as e:
+                    _log.warning(
+                        "semantic_cache_serialize_failed",
+                        error=str(e),
+                        fields=sorted(output.keys()),
                     )
-                except (ServiceUnavailableError, ConnectionError, OSError) as e:
-                    _log.warning("semantic_cache_store_failed", error=str(e))
-                    cache = None
-                    self._cache = None
+                if payload is not None:
+                    try:
+                        cache.store(cache_key, payload, _vector=cache_vector)
+                    except (ServiceUnavailableError, ConnectionError, OSError) as e:
+                        _log.warning("semantic_cache_store_failed", error=str(e))
+                        cache = None
+                        self._cache = None
 
             # Stochastic scoring: only evaluate 1-in-10 inferences
             # (drift monitoring only needs statistical signal, not every sample)
             global _infer_count
-            content = str(next(iter(output.values()), ""))
+            # Score the answer, not the first output field: for CoT programs the
+            # first field is `reasoning`, so scoring it graded the chain of
+            # thought and drove drift alerts / recompile queues off the wrong
+            # text.
+            content = str(prediction_output(result) or "")
             score = 0.5
             if content and _infer_count % 10 == 0:
                 score = auto_metric(content)

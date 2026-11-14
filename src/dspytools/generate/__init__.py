@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from dspytools.core.metrics import llms_txt_metric, llms_txt_quality
 from dspytools.generate.data import build_ground_truth_examples
-from dspytools.generate.explorer import GitRepoExplorer, gather_repository_info
+from dspytools.generate.explorer import (
+    GitRepoExplorer,
+    gather_repository_info,
+    load_mcp_tools_sync,
+)
 from dspytools.generate.module import (
     AnalyzeCodeStructure,
     AnalyzeRepository,
@@ -30,4 +34,5 @@ __all__ = [
     "build_ground_truth_examples",
     "GitRepoExplorer",
     "gather_repository_info",
+    "load_mcp_tools_sync",
 ]

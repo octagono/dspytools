@@ -14,6 +14,7 @@ from pathlib import Path
 from dspytools.config.settings import compiled_dir, skills_dir as get_skills_dir
 from dspytools.core._dspy import dspy
 from dspytools.core._io import read_json
+from dspytools.core.metrics import answer_exact_match
 from dspytools.graph.skill_graph import FalkorDBSkillGraph
 from dspytools.skills.loader import Skill, SkillLoader
 
@@ -76,20 +77,23 @@ signature: {signature}
         sig = skill.frontmatter.get("signature", "question -> answer")
         student = dspy.Predict(sig)
 
-        # Simple metric: output has content
+        # Metric: normalized exact match against the example's expected answer
+        # (a truthiness check accepted every non-empty output, so bootstrap
+        # never discriminated good demos from bad ones).
         def metric(e, p, t=None):
-            return 1.0 if getattr(p, "output", getattr(p, "answer", "")) else 0.0
+            gold = getattr(e, "output", getattr(e, "answer", ""))
+            pred = getattr(p, "output", getattr(p, "answer", ""))
+            return 1.0 if answer_exact_match(gold, pred) else 0.0
 
         optimizers = {
             "labeled_few_shot": lambda: dspy.LabeledFewShot(
                 k=min(4, len(trainset or []))
             ).compile(student=student, trainset=trainset or []),
+            # Demo caps stay at DSPy's defaults (labeled 16 / bootstrapped 4).
             "bootstrap_few_shot": lambda: dspy.BootstrapFewShot(
                 metric=metric,
                 # None keeps metric truthiness; 0 would accept every score >= 0.
                 metric_threshold=None,
-                max_labeled_demos=4,
-                max_bootstrapped_demos=4,
             ).compile(student=student, trainset=trainset or []),
         }
 

@@ -182,8 +182,11 @@ def tool_python_interpreter(code: str):
     """Execute Python code in DSPy sandbox (Deno/Pyodide)."""
     from dspytools.core._dspy import dspy
 
-    interpreter = dspy.PythonInterpreter()
-    result = interpreter.execute(code)
+    # The Deno/Pyodide sandbox is a ~400 MB subprocess tree — it must be torn
+    # down or the CLI process leaks it. `dspy.PythonInterpreter` is a context
+    # manager whose __exit__ calls shutdown().
+    with dspy.PythonInterpreter() as interpreter:
+        result = interpreter.execute(code)
     console.print(f"[bold]Output:[/]\n{result}")
 
 

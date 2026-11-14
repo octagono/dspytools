@@ -67,6 +67,110 @@ def _reasoning_kwargs(section: dict) -> dict[str, Any]:
     return {} if enable_thinking else {"reasoning_effort": "none"}
 
 
+# Keys of ``cfg["dspy"]`` that map 1:1 onto a ``dspy.configure()`` setting.
+# Anything else in that section (``adapter``, ``model_type``, ``cache``,
+# ``profile``) is consumed by this module directly and is never forwarded.
+_RUNTIME_SETTING_KEYS = (
+    "track_usage",
+    "num_threads",
+    "max_errors",
+    "async_max_workers",
+    "disable_history",
+    "max_history_size",
+    "allow_tool_async_sync_conversion",
+    "provide_traceback",
+    "warn_on_type_mismatch",
+)
+
+
+def resolve_safe_types(specs: Any) -> list[type]:
+    """Resolve ``"module:Class"`` / ``"module.Class"`` spellings into classes.
+
+    Used for ``dspy.configure_cache(safe_types=...)`` — the only widening knob
+    on restricted cache deserialization.  Raises ``ValueError`` on a bad spec.
+    """
+    from importlib import import_module
+
+    resolved: list[type] = []
+    for spec in specs:
+        separator = ":" if ":" in spec else "."
+        module_name, _, attr = spec.rpartition(separator)
+        if not module_name or not attr:
+            raise ValueError(
+                f"safe type must be 'module:Class' or 'module.Class', got {spec!r}"
+            )
+        try:
+            obj = getattr(import_module(module_name), attr)
+        except (ImportError, AttributeError) as exc:
+            raise ValueError(f"cannot resolve safe type {spec!r}: {exc}") from exc
+        if not isinstance(obj, type):
+            raise ValueError(f"safe type {spec!r} is not a class")
+        resolved.append(obj)
+    return resolved
+
+
+def _apply_cache_config(cfg: dict) -> None:
+    """Apply persisted ``cfg["dspy"]["cache"]`` through ``dspy.configure_cache``.
+
+    No section, no call: DSPy's own cache defaults stay in force.  Restricted
+    deserialization is a project contract, so ``restrict_pickle`` is always
+    True here — cache "disable" turns caching off, it never loosens this.
+    """
+    cache_cfg = cfg.get("dspy", {}).get("cache")
+    if not cache_cfg:
+        return
+
+    kwargs: dict[str, Any] = {
+        "enable_disk_cache": bool(cache_cfg.get("enable_disk_cache", True)),
+        "enable_memory_cache": bool(cache_cfg.get("enable_memory_cache", True)),
+        "restrict_pickle": True,
+    }
+    if cache_cfg.get("disk_size_limit_bytes") is not None:
+        kwargs["disk_size_limit_bytes"] = int(cache_cfg["disk_size_limit_bytes"])
+    if cache_cfg.get("safe_types"):
+        kwargs["safe_types"] = resolve_safe_types(cache_cfg["safe_types"])
+    dspy.configure_cache(**kwargs)
+
+
+def _runtime_settings(cfg: dict) -> dict[str, Any]:
+    """``cfg["dspy"]`` entries that are real ``dspy.configure()`` settings.
+
+    Only keys actually present are returned: an unset key must not be injected,
+    so DSPy's own default for it stays in force.
+
+    ``track_usage`` is the one setting with a project default (``True`` — see
+    :func:`_default_track_usage`).  It is applied through the settings object
+    instead of being injected here, so the "never forward an unset key"
+    contract for ``dspy.configure`` kwargs stays exact.
+    """
+    section = cfg.get("dspy", {})
+    return {k: section[k] for k in _RUNTIME_SETTING_KEYS if k in section}
+
+
+def _default_track_usage() -> None:
+    """Turn DSPy usage tracking on unless config already set it.
+
+    ``core.cost_tracker`` records *measured* tokens from
+    ``Prediction.get_lm_usage()``, which DSPy only populates when
+    ``settings.track_usage`` is true (verified against dspy 3.5.0: the getter
+    returns ``None`` when tracking is off).  Without this default every cost
+    report would silently fall back to ``PRICING`` estimates.
+
+    Written straight into ``main_thread_config`` — the dict ``configure()``
+    itself writes and every ``dspy.context`` copies.  A direct assignment is
+    used deliberately: it neither injects an extra ``dspy.configure`` kwarg
+    (which would break the "unset keys stay unset" contract) nor trips the
+    configure-owner-thread ``RuntimeError`` when setup runs off the owner
+    thread.  ``dspy.configure(track_usage=...)`` from config always wins
+    because it is forwarded as a normal runtime setting.
+    """
+    import sys as _sys
+
+    _cfg_mod = _sys.modules.get("dspy.dsp.utils.settings")
+    if _cfg_mod is not None:
+        _cfg_mod.main_thread_config["track_usage"] = True
+
+
 def _lm_cache_key(model: str, lm_kw: dict[str, Any]) -> str:
     """Cache key covering every setting that changes generated output.
 
@@ -108,11 +212,13 @@ class LMRegistry:
         """
         resolved_model = model or "openai/gpt-4o"
 
+        resolved_cache = kwargs.get("cache")
         lm_kw: dict[str, Any] = {
             "model": resolved_model,
             "temperature": kwargs.get("temperature", 0.2),
             "max_tokens": kwargs.get("max_tokens", 4096),
-            "cache": kwargs.get("cache", True),
+            # None means "unspecified" — keep DSPy's cached-by-default behavior.
+            "cache": True if resolved_cache is None else resolved_cache,
         }
         model_type = _model_type(
             load_config(),
@@ -255,13 +361,20 @@ def setup_dspy(
     api_key: str | None = None,
     max_tokens: int = 4096,
     temperature: float = 0.2,
-    cache: bool = False,
-    warn_type: bool = False,
+    cache: bool | None = None,
+    warn_type: bool | None = None,
 ) -> dspy.LM:
     """Configure DSPy with an LM. Uses LMRegistry singleton.
 
     Optimization 23: Returns cached LM immediately if already configured
-    (unless caller explicitly passes model/api_base/api_key overrides).
+    (unless caller explicitly passes model/api_base/api_key overrides, or a
+    temperature/max_tokens/cache that differs from the previous call).
+
+    Also applies the persisted ``cfg["dspy"]`` runtime settings and cache
+    policy — only the keys actually present, so DSPy's defaults stand for the
+    rest.  The one exception is ``track_usage``, which defaults to on so
+    ``Prediction.get_lm_usage()`` reports real tokens for
+    ``core.cost_tracker``; config can turn it off.
     """
     global _setup_configured
 
@@ -271,7 +384,9 @@ def setup_dspy(
         and model is None
         and api_base is None
         and api_key is None
-        and not cache
+        and cache is None
+        and temperature == 0.2
+        and max_tokens == 4096
     ):
         return LMRegistry.get_or_default()
 
@@ -281,8 +396,8 @@ def setup_dspy(
     # When no model specified, use the student model from config (auto-resolves api_base + api_key)
     if model is None:
         lm = LMRegistry.get_or_default()
-        # Apply any explicit temperature/max_tokens overrides using same api_base/api_key
-        if temperature != 0.2 or max_tokens != 4096 or cache:
+        # Apply any explicit temperature/max_tokens/cache overrides using same api_base/api_key
+        if temperature != 0.2 or max_tokens != 4096 or cache is not None:
             cfg = load_config()
             student = cfg.get("lm", {}).get("student", {})
             lm = LMRegistry.get(
@@ -372,9 +487,14 @@ def setup_dspy(
         # {"type": "json_object"} and passes it to the LM.  DeepSeek rejects
         # this with "This response_format type is unavailable now" on some
         # API key tiers.  The LMError propagates up through ChatAdapter and
-        # kills the call.  Fix: patch JSONAdapter.__call__ to catch LMError
-        # where response_format was set, strip it, and retry via the plain
-        # ChatAdapter path (text-based parsing, no structured output).
+        # kills the call.  Fix: catch that LMError and retry once through a
+        # plain ChatAdapter, which never sets response_format and parses text
+        # sections instead of structured output.
+        #
+        # The retry must be a different adapter instance: any call back through
+        # JSONAdapter/BAMLAdapter re-enters _call_preprocess ->
+        # _prepare_response_format, which re-injects response_format and would
+        # re-send the request the provider just rejected.
         from dspy.adapters.json_adapter import JSONAdapter as _JSONAdapter
         from dspy.utils.exceptions import LMError
 
@@ -384,15 +504,13 @@ def setup_dspy(
             try:
                 return _orig_json_call(self, lm, lm_kwargs, signature, demos, inputs)
             except LMError:
-                # If response_format was set and the LM rejected it, retry
-                # without it using the ChatAdapter text-parsing path.
-                if lm_kwargs.get("response_format") is not None:
-                    lm_kwargs_copy = dict(lm_kwargs)
-                    lm_kwargs_copy.pop("response_format", None)
-                    return super(_JSONAdapter, self).__call__(
-                        lm, lm_kwargs_copy, signature, demos, inputs
-                    )
-                raise
+                # Only response_format-related failures are retryable.
+                if lm_kwargs.get("response_format") is None:
+                    raise
+                fallback_kwargs = {
+                    k: v for k, v in lm_kwargs.items() if k != "response_format"
+                }
+                return dspy.ChatAdapter()(lm, fallback_kwargs, signature, demos, inputs)
 
         _JSONAdapter.__call__ = _patched_json_call
 
@@ -538,12 +656,20 @@ def setup_dspy(
         # Default (and fallback for unknown/stale values): BAMLAdapter
         adapter = _BAMLAdapter(use_native_function_calling=False)
 
+    # Persisted runtime settings + cache policy.  Only keys present in config
+    # are forwarded — never synthesize a value the user did not set.
+    _apply_cache_config(cfg)
+    runtime_settings = _runtime_settings(cfg)
+    if warn_type is not None:
+        runtime_settings["warn_on_type_mismatch"] = warn_type
+
+    # Usage tracking defaults ON so Prediction.get_lm_usage() is populated for
+    # core.cost_tracker; a persisted "track_usage" wins via runtime_settings.
+    if "track_usage" not in runtime_settings:
+        _default_track_usage()
+
     try:
-        dspy.configure(
-            lm=lm,
-            adapter=adapter,
-            warn_on_type_mismatch=warn_type,
-        )
+        dspy.configure(lm=lm, adapter=adapter, **runtime_settings)
     except RuntimeError:
         # DSPy thread-safety: once dspy.settings.configure() is called from one
         # thread, only that thread may call it again.  If another thread already
@@ -558,7 +684,7 @@ def setup_dspy(
         if _cfg_mod is not None:
             _cfg_mod.main_thread_config["lm"] = lm
             _cfg_mod.main_thread_config["adapter"] = adapter
-            _cfg_mod.main_thread_config["warn_on_type_mismatch"] = warn_type
+            _cfg_mod.main_thread_config.update(runtime_settings)
 
     # Optimization 2: Lazy-load — create HotSwapManager but defer load_all() to first swap/infer.
     # The index is loaded lazily on first metadata access. This avoids reading 60+ JSON files

@@ -304,7 +304,7 @@ def test_default_adapter_is_baml_without_native_function_calling(
     adapter = captured["adapter"]
     assert isinstance(adapter, BAMLAdapter)
     assert adapter.use_native_function_calling is False
-    assert captured["warn_on_type_mismatch"] is False
+    assert "warn_on_type_mismatch" not in captured
 
 
 # ── 6. ReAct contract on DSPy 3.5 ─────────────────────────────────────────

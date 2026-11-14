@@ -13,7 +13,6 @@ import sys
 from dspytools.cli.rich_config import LLMCommand, LLMGroup, click
 from dspytools.core.registry import delete_module, list_modules
 from dspytools.core.setup import setup_dspy
-from dspytools.generators import ModuleGeneratorDSPy
 
 # ---------------------------------------------------------------------------
 # CLI Commands
@@ -102,7 +101,8 @@ def module_new(
         from dspytools.config.settings import load_config
 
         cfg = load_config()
-        teacher = cfg.get("lm", {}).get("teacher", {})
+        # An explicitly-null `lm.teacher` in config resolves to None, not {}.
+        teacher = cfg.get("lm", {}).get("teacher") or {}
         model = teacher.get("model")
     setup_dspy(model=model)
 
@@ -146,7 +146,10 @@ def module_new(
         if sig_cls is None:
             click.echo(f"  No Signature class found in '{sig_path}'", err=True)
             raise click.Abort()
-        sig_str = str(sig_cls)
+        # `str(sig_cls)` is the metaclass repr (instructions + Field(...) schema);
+        # `sig_cls.signature` is the prompt string DSPy itself uses, e.g.
+        # "question -> answer".
+        sig_str = sig_cls.signature
     else:
         click.echo("  Either --signature or --from-prompt is required", err=True)
         raise click.Abort()
@@ -154,7 +157,10 @@ def module_new(
     if not instructions:
         instructions = f"A {mod_type.lower()} module for {name}"
 
-    # Run the DSPy generator module
+    # Run the DSPy generator module. Imported here because the generator is a
+    # real dspy.Module subclass, so importing it materialises dspy.
+    from dspytools.generators import ModuleGeneratorDSPy
+
     gen = ModuleGeneratorDSPy()
     code, has_tools, out_fields = gen.generate(
         name,

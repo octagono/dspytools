@@ -14,6 +14,7 @@ import json as _j
 import pathlib
 import subprocess as _sp
 import sys
+import threading
 import time
 import urllib.request
 from collections import OrderedDict
@@ -215,6 +216,32 @@ def _error(exception: Exception | str, detail: str | None = None) -> str:
     if detail:
         payload["detail"] = detail
     return json.dumps(payload)
+
+
+_setup_lock = threading.Lock()
+
+
+def _ensure_lm_configured() -> None:
+    """Configure DSPy at most once, and only if the LM is not already configured.
+
+    MCP tool handlers run on worker threads. `dspy.configure()` may only be
+    called by the thread that first configured settings — any other thread
+    raises `RuntimeError`, and `core.setup.setup_dspy`'s documented fallback
+    then writes `dspy.dsp.utils.settings.main_thread_config` directly. Calling
+    `setup_dspy()` from every handler would therefore re-enter that fallback on
+    every tool call, so the MCP side guards it:
+
+    - if `dspy.settings.lm` is already set, do nothing (reads are global);
+    - otherwise configure once under a lock.
+
+    Per-call isolation belongs to the caller via `with dspy.context(...)`.
+    """
+    if getattr(dspy.settings, "lm", None) is not None:
+        return
+    with _setup_lock:
+        if getattr(dspy.settings, "lm", None) is not None:
+            return
+        setup_dspy()
 
 
 def tool_list_programs() -> str:
@@ -501,7 +528,7 @@ def tool_mlflow_status() -> str:
 
 def tool_generate_llms_txt(target: str, local: bool = False, output: str = "") -> str:
     """Generate llms.txt for a repository."""
-    setup_dspy()
+    _ensure_lm_configured()
     repo_url = target
     file_tree, readme, packages, history = gather_repository_info(
         str(target) if local else ""
@@ -525,7 +552,7 @@ def tool_generate_llms_txt(target: str, local: bool = False, output: str = "") -
 
 def tool_compile_optimizer(optimizer: str, module_name: str, trainset_path: str) -> str:
     """Trigger a DSPy compile with a specific optimizer."""
-    setup_dspy()
+    _ensure_lm_configured()
     student = load_module_by_name(module_name)
     trainset = load_trainset(trainset_path)
     spec = _OPTIMIZER_SPECS.get(optimizer)
@@ -595,7 +622,7 @@ def tool_sandbox_stats() -> str:
 
 def tool_gfl_run_halving(module_name: str, trainset_path: str) -> str:
     """Run GFL pipeline with Successive Halving early pruning."""
-    setup_dspy()
+    _ensure_lm_configured()
     student = load_module_by_name(module_name)
     trainset = load_trainset(trainset_path)
     pipeline = GFLPipeline()
@@ -750,7 +777,7 @@ def tool_stream_infer(input_text: str, program_id: str = "") -> str:
     Returns full output with token count metadata.
     """
 
-    setup_dspy()
+    _ensure_lm_configured()
     mgr = HotSwapManager()  # lazy — no load_all()
 
     if program_id:
@@ -956,7 +983,7 @@ def tool_opsd_purify(
     question-relevant knowledge while rejecting reference-induced shortcuts.
     Can wrap any existing optimizer for combined purify+optimize.
     """
-    setup_dspy()
+    _ensure_lm_configured()
     student = load_module_by_name(module_name)
 
     if trainset_json:
@@ -1007,7 +1034,7 @@ def tool_lse_explore(
     Tracks improvement not absolute score: r_LSE = R̄(c₁) − R̄(c₀).
     """
 
-    setup_dspy()
+    _ensure_lm_configured()
     student = load_module_by_name(module_name)
 
     lse = LSETreeExplorer(max_depth=max_depth)
@@ -1082,17 +1109,50 @@ def tool_gepa_frontier(module_name: str, scores_json: str = "") -> str:
     )
 
 
+def _gepa_feedback_metric(
+    gold: Any,
+    pred: Any,
+    trace: Any = None,
+    pred_name: Any = None,
+    pred_trace: Any = None,
+) -> float:
+    """Five-argument GEPA feedback metric `(gold, pred, trace, pred_name, pred_trace)`.
+
+    GEPA validates its metric by binding five positional arguments and refuses
+    the three-argument `exact_match_metric()` factories — use this for any
+    GEPA optimizer created from MCP tools.
+    """
+    return exact_match_metric()(gold, pred, trace)
+
+
 def _make_optimizer_instance(name: str):
-    """Helper to create optimizer instances for MCP tools."""
+    """Helper to create optimizer instances for MCP tools.
+
+    GEPA needs two things the shared `exact_match_metric()` factory cannot
+    supply: a five-argument metric and a reflection LM. The reflection LM is
+    always the teacher role (`LMRegistry.get_teacher()`) — it is never
+    satisfied by the student, and a missing teacher raises instead of silently
+    degrading the tool run.
+    """
     metric = exact_match_metric()
     if name == "bootstrap_few_shot":
-        return dspy.BootstrapFewShot(
-            metric=metric, max_labeled_demos=2, max_bootstrapped_demos=2
-        )
+        # Demo caps stay at the DSPy defaults (labeled 16 / bootstrapped 4) so the
+        # MCP path matches `compile bootstrap-few-shot`; DSPy clamps both to the
+        # trainset size, so a small devset cannot inflate the run.
+        return dspy.BootstrapFewShot(metric=metric)
     if name == "mipro":
         return dspy.MIPROv2(metric=metric, auto="light")
     if name == "gepa":
-        return dspy.GEPA(metric=metric, auto="light")
+        teacher = LMRegistry.get_teacher()
+        if teacher is None:
+            raise ValueError(
+                "gepa requires a teacher (reflection) LM — configure one with "
+                "`dspytools configure lm set teacher <model>` (or set "
+                "DEEPSEEK_API_KEY) and retry. LMRegistry.get_teacher() returned None."
+            )
+        return dspy.GEPA(
+            metric=_gepa_feedback_metric, auto="light", reflection_lm=teacher
+        )
     return dspy.LabeledFewShot(k=3)
 
 
@@ -1829,7 +1889,7 @@ def tool_evaluate(module: str, devset_path: str) -> str:
     old_stdout = sys.stdout
     sys.stdout = io.StringIO()
     try:
-        setup_dspy()
+        _ensure_lm_configured()
         program = _load_program(module)
         examples = load_trainset(devset_path)
         metric = _get_metric("exact_match")
@@ -1851,14 +1911,39 @@ def tool_gfl_synthesize(seed_path: str, target: int = 10) -> str:
     return json.dumps(result)
 
 
+def _last_lm_output() -> str:
+    """Return the most recent raw LM response text recorded by the active LM.
+
+    DSPy LMs append every call to `lm.history`; GEPA/ReAct failures are far
+    easier to diagnose with the model output that failed to parse, so the
+    error payload for `tool_agent_run` includes it.
+    """
+    lm = getattr(dspy.settings, "lm", None)
+    history = getattr(lm, "history", None) or []
+    if not history:
+        return ""
+    last = history[-1]
+    response = last.get("response") if isinstance(last, dict) else None
+    text = getattr(response, "text", None)
+    if text is not None:
+        return str(text)
+    return str(response) if response is not None else ""
+
+
 def tool_agent_run(question: str, tools: str = "[]") -> str:
     """Run a ReAct agent with specified tools.
 
     TOOLS: JSON array of tool handler names from this MCP server,
     or empty [] for a no-tool reasoning agent.
+
+    A failed forced submit raises `AdapterParseError` (a ValueError *subclass
+    is not guaranteed* — `issubclass(dspy.AdapterParseError, ValueError)` is
+    False) or `ContextWindowExceededError`. Those are returned as a structured
+    error payload naming the exception and the last model output, never
+    propagated to the MCP transport.
     """
 
-    setup_dspy()
+    _ensure_lm_configured()
 
     # Parse tool names and wire to handler functions
     tool_names = json.loads(tools) if tools else []
@@ -1877,11 +1962,26 @@ def tool_agent_run(question: str, tools: str = "[]") -> str:
     adapter = BAMLAdapter(
         use_native_function_calling=False,
     )
-    # DSPy 3.5: dspy.ReAct is the structured agent loop (typed `submit` tool,
-    # History trace, termination_reason); ReActV2 is a deprecated alias of it.
-    agent = dspy.ReAct("question -> answer", tools=dspy_tools, max_iters=8)
-    with dspy.context(adapter=adapter):
-        result = agent(question=question)
+    try:
+        # DSPy 3.5: dspy.ReAct is the structured agent loop (typed `submit`
+        # tool, History trace, termination_reason); ReActV2 is a deprecated
+        # alias of it.
+        agent = dspy.ReAct("question -> answer", tools=dspy_tools, max_iters=8)
+        with dspy.context(adapter=adapter):
+            result = agent(question=question)
+    except Exception as e:
+        # MCP handlers report in-band — see the `_error` layering contract.
+        return json.dumps(
+            {
+                "error": f"{type(e).__name__}: {e}",
+                "exception": type(e).__name__,
+                "last_model_output": _last_lm_output()[:1000],
+                "detail": (
+                    "agent run failed (forced submit raises AdapterParseError or "
+                    "ContextWindowExceededError)"
+                ),
+            }
+        )
     return json.dumps(
         {
             "answer": getattr(result, "answer", str(result))[:500],

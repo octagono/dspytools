@@ -30,7 +30,8 @@ The skills directory implements the Agent Skills system — a BM25-indexed libra
   - Returns the created `Skill` instance immediately (no compilation)
 - `SkillManager.compile_skill(name, trainset=None, optimizer="labeled_few_shot")` → `{status, skill, optimizer, has_program}`
   - Compiles a DSPy program using the skill's signature from frontmatter
-  - Supports `"labeled_few_shot"` and `"bootstrap_few_shot"` optimizers
+  - Supports `"labeled_few_shot"` and `"bootstrap_few_shot"` optimizers; the bootstrap metric is normalized exact match against the example's expected answer (`core.metrics.answer_exact_match`), not an "output is non-empty" truthiness check
+  - Demo caps stay at DSPy's defaults (labeled 16 / bootstrapped 4) — do not pin both to 4
   - Saves compiled program to `{skill_dir}/program.json` and signature metadata to `signature.json`
   - Returns `{error: ...}` dict if skill not found
   - With no trainset, saves the unoptimized base program

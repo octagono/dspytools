@@ -200,6 +200,15 @@ def agent_list():
         "structured loop). 'react-v2' is kept as a legacy alias."
     ),
 )
+@click.option(
+    "--parallel-tools",
+    is_flag=True,
+    default=False,
+    help=(
+        "Let one agent turn issue several tool calls (native function calling "
+        "required); off by default"
+    ),
+)
 def agent_run(
     name: str,
     question: str,
@@ -208,6 +217,7 @@ def agent_run(
     top_k: int,
     show_tools: bool,
     agent_type: str,
+    parallel_tools: bool,
 ):
     """Run an agent with a question.
 
@@ -222,6 +232,7 @@ def agent_run(
         dspytools agent run my-agent "search mlflow traces" --top-k 3
         dspytools agent run my-agent "compare two programs" --show-tools
         dspytools agent run my-agent "summarize a repo" --agent-type react-v2
+        dspytools agent run my-agent "audit 3 repos" --parallel-tools
     """
     setup_dspy(model=model)
 
@@ -270,7 +281,19 @@ def agent_run(
     agent = dspy.ReAct("question -> answer", tools=selected, max_iters=max_iters)
 
     click.echo("  Running agent...")
-    result = agent(question=question)
+    # A failed forced submit raises (AdapterParseError, ContextWindowExceededError)
+    # rather than returning a partial Prediction — report it as a CLI error.
+    from dspytools.commands.run import (
+        _agent_errors,
+        _agent_failure,
+        _parallel_tools_context,
+    )
+
+    try:
+        with _parallel_tools_context(parallel_tools):
+            result = agent(question=question)
+    except _agent_errors() as err:
+        raise _agent_failure(err) from err
     answer = getattr(result, "answer", None)
     termination = getattr(result, "termination_reason", "unknown")
     turns = len(getattr(getattr(result, "history", None), "messages", None) or [])

@@ -51,7 +51,7 @@ This doc owns all files in `src/dspytools/evolve/` including the `layers/` subdi
 - **6 built-in tools** (all `dspy.Tool` instances):
   - `list_programs()` → JSON list of loaded compiled programs
   - `swap_program(program_id)` → JSON `{status, active, previous}` or `{error}`
-  - `infer(**inputs)` → JSON `{status, result}` or `{error}`
+  - `infer(prompt="")` → JSON `{status, result}` or `{error}`. Explicit single parameter (not `**inputs`), passed through as the active program's `input` field; the `dspy.Tool` declares `args`/`arg_types`/`arg_desc` so the model sees a described `prompt` argument instead of an opaque `inputs` object
   - `list_optimizers()` → JSON array of optimizer names
   - `evaluate(content)` → JSON `{score}` via `auto_metric`
   - `compile_decision(program_id, score, threshold=0.5)` → JSON with `{needs_compile, action}`
@@ -173,6 +173,7 @@ Load methods are **fail-fast** — corrupted state files raise immediately inste
 
 - `SelfEvolve` in `__init__.py` is the primary user-facing API. `SelfEvolveEngine` in `self_evolve.py` is the internal continuous learning engine. They serve different purposes — keep them separate.
 - When adding tools to `RouterAgent`, add them to `_build_router_tools()` and return a `dspy.Tool` with a `name` and `desc`.
+- Router tool handlers must have explicit, typed parameters — never `**kwargs`. DSPy records a `**kwargs` handler as `Tool.args == {'inputs': {}}` with `has_kwargs=True`, so the model is asked to invent an opaque `inputs` object instead of named arguments. Declare `args`/`arg_types`/`arg_desc` when the auto-derived schema is not descriptive enough.
 - Router tools return JSON strings — callers must `json.loads()` the result. Error states return `{"error": str}` format.
 - `auto_metric` is intentionally heuristic and rule-based. Do not add learned scoring here — that belongs in the GFL pipeline.
 - Quality thresholds: `score < 0.4` in `ask()` triggers `needs_optimization` flag; `avg_score < 0.5` in `evolve()` triggers `should_recompile`. These are separate thresholds for different purposes.

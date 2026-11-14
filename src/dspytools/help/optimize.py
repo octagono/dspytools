@@ -14,6 +14,7 @@ else:
 from dspytools.config.settings import DEFAULT_SEED, help_cache_path, help_meta_path
 from dspytools.core._io import write_json
 from dspytools.core.logging_config import get_logger
+from dspytools.core.metrics import answer_overlap_score
 from dspytools.core.programs import is_current_dspy_version, saved_dspy_version
 from dspytools.core.setup import LMRegistry
 from dspytools.help.context import build_trainset_from_cli
@@ -74,9 +75,14 @@ class AutoCompiler:
         teacher = LMRegistry.get_teacher() if use_teacher else None
 
         if teacher:
-            # GEPA with deepseek teacher for rich reflection
+            # GEPA with deepseek teacher for rich reflection. The metric is
+            # graded against the example's expected answer: a non-empty answer
+            # used to score 1.0, which (with skip_perfect_score=True) dropped
+            # every example from reflection and wasted the teacher budget.
             def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
-                return 1.0 if getattr(pred, "answer", "") else 0.0
+                return answer_overlap_score(
+                    getattr(gold, "answer", ""), getattr(pred, "answer", "")
+                )
 
             # Split valset to suppress GEPA "no valset" warning
             valset_size = max(1, len(trainset) // 5)

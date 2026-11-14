@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json as _json
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import dspy
@@ -86,9 +86,13 @@ def _build_router_tools() -> list[dspy.Tool]:
         return _json.dumps({"status": "ok", "active": program_id, "previous": prev})
 
     @mlflow_trace(span_type="TOOL")
-    def tool_infer(**inputs: Any) -> str:
-        """Run inference with active program."""
-        result = mgr.infer(**inputs)
+    def tool_infer(prompt: str = "") -> str:
+        """Run inference with the active program.
+
+        Args:
+            prompt: Text passed verbatim as the active program's `input` field.
+        """
+        result = mgr.infer(input=prompt)
         return _json.dumps({"status": "ok", "result": result}, default=str)
 
     @mlflow_trace(span_type="TOOL")
@@ -141,7 +145,22 @@ def _build_router_tools() -> list[dspy.Tool]:
             name="swap_program",
             desc="Switch the active compiled program",
         ),
-        dspy.Tool(tool_infer, name="infer", desc="Run inference with active program"),
+        dspy.Tool(
+            tool_infer,
+            name="infer",
+            desc="Run inference with active program",
+            args={
+                "prompt": {
+                    "type": "string",
+                    "description": "Text passed verbatim as the active program's `input` field",
+                    "default": "",
+                }
+            },
+            arg_types={"prompt": str},
+            arg_desc={
+                "prompt": "Text passed verbatim as the active program's `input` field"
+            },
+        ),
         dspy.Tool(
             tool_list_optimizers,
             name="list_optimizers",

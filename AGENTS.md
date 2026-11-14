@@ -54,7 +54,7 @@ When the user requests a durable behavior change, record it here or in the relev
 
 1. **Lazy import**: always `from dspytools.core._dspy import dspy` — never `import dspy` directly
 2. **Teacher LM only for optimization**: `LMRegistry.get_teacher()` only in GEPA/distill/finetune paths. Never for inference.
-3. **Holdout never seen by optimizer**: `split_holdout()` before any compile call
+3. **Holdout never seen by optimizer**: `split_holdout()` before any compile call — `compile <optimizer>` splits `HoldoutGate` before constructing the optimizer and carves GEPA/MIPROv2 valsets out of the train split, never the holdout
 4. **No try/except around imports**: all packages are hard dependencies
 5. **Student LM (Qwen 7B local) for inference, Teacher (DeepSeek V4) for reflection only**
 6. **Ruff 0 errors required before commit**
@@ -69,8 +69,12 @@ When the user requests a durable behavior change, record it here or in the relev
 - **Removed upstream**: `CodeAct`, `ProgramOfThought`, `dspy.experimental`, `TypedPredictor`, `Image.from_file`/`from_PIL`, `lm(messages=...)`, `Tool.format_as_litellm_function_call`. `dspytools run pot|code-act` map to `dspy.RLM`.
 - **Adapter**: upstream default is `XMLAdapter(use_native_function_calling=True)`; `dspytools` always selects one explicitly, so `settings.adapter` is never `None`. The code default is `baml`; `dspy.adapter` accepts `baml`/`chat`/`json`/`xml` and the configured value wins (`dspytools configure dspy show`).
 - **Reasoning fields**: `ChainOfThought` rationale is `dspy.Reasoning`/`None`, not `str`; it is str-like but fails `isinstance(x, str)` and `json.dumps`. Opt into text with `rationale_field_type=str`.
+- **Metrics**: `core.metrics.exact_match_metric` normalizes both answers (strip/casefold/whitespace/surrounding punctuation) before comparing; `gepa_metric` returns `dspy.Prediction(score, feedback)` (use `gepa_metric_float` where the metric is summed, e.g. `dspy.BetterTogether`).
+- **GRPO** (`dspy.teleprompt.grpo.GRPO`, not re-exported by `dspy`) is finetune-only and has no `lora`/`beta`/`max_steps` kwargs in 3.5 — `compile grpo` maps `--max-steps` to `num_train_steps` and fails fast on a local llama.cpp endpoint.
 - **GEPA/Flex/RLM are graduated** (no `dspy.experimental`). GEPA kwargs are validated against the installed constructor — accept, never hardcode a version list.
 - **Caches**: restricted deserialization is the default (canonical v2 keys invalidate old entries); `configure_cache(safe_types=...)` is the only widening knob.
+- **Usage accounting**: `setup_dspy()` turns DSPy's `track_usage` on by default (a persisted `dspy.track_usage` still wins). Read real numbers from `Prediction.get_lm_usage()` / `lm.history[-1]["usage"|"cost"]` via `core.cost_tracker`; cached calls report `None` and are skipped, never counted as free work.
+- **Retries**: `core.retry` retries upstream's own classifier (`dspy.utils.exceptions._RETRYABLE_LM_ERRORS`: rate-limit, timeout, server, transport, lock-timeout) plus stdlib transients, honours `retry_after`, and refuses context-window/auth/bad-request/config errors even if a caller widens the tuple. `LMUnexpectedError` is deliberately not retried — upstream does not classify unclassified failures as retryable.
 - **Not adopted**: rich tool results (images/files from tools). The `chat`/chat-completions presets declare `tool_result_media="reject"` in lm15, so a media part in a tool result aborts the agent mid-turn. Revisit only with a media-capable route and `mcp/loader.py` emitting `dspy.Image` parts behind an explicit flag.
 
 ## Project Map
@@ -132,7 +136,7 @@ Root governs the dspytools project — DSPy 3.5.0 examples running on Qwen3.5-9B
 ## Quick Commands
 
 ```bash
-pytest tests/ -q              # 369 hermetic tests, ~5s (DummyLM only; 20 Redis/FalkorDB failures when no container is up)
+pytest tests/ -q              # 487 hermetic tests, ~6s (DummyLM only; 20 Redis/FalkorDB failures when no container is up)
 ruff check                     # zero errors required
 dspytools --help               # explore all 24 commands
 dspytools self auto-fix         # inspect and fix drift-degraded programs

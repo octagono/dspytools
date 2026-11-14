@@ -10,7 +10,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Ruff](https://img.shields.io/badge/ruff-zero--errors-brightgreen)
 ![Pyright](https://img.shields.io/badge/pyright-zero--errors-brightgreen)
-![Tests](https://img.shields.io/badge/tests-369-pass-brightgreen)
+![Tests](https://img.shields.io/badge/tests-487-pass-brightgreen)
 
 A production-grade, self-evolving CLI for DSPy program management — featuring hot-swap inference,
 MCP agent interoperability, a Generative Feedback Loop (GFL) pipeline, skills system,
@@ -133,7 +133,7 @@ graph TD
 | `compile` | 23 | 21 optimizers + submit/status/list/cancel |
 | `agent`  | 4 | New, list, run, delete ReAct agents |
 | `tool`  | 6 | List, show, from-mcp, inspect, python-interpreter, history |
-| `evaluate`| 2 | Run evaluation, list available metrics |
+| `evaluate`| 2 | Run evaluation (run dir or `program.json`, `--answer-field`), list metrics |
 | `data`  | 3 | List, load, preview datasets |
 | `distill` | 5 | LoRA distillation pipeline (run, list-frameworks, stats, prepare-colab, check) |
 | `inspect` | 7 | History, config, cache, tools, experimental, version |
@@ -491,9 +491,9 @@ dspytools module delete <name>         # Delete module
 ### Inference (`run`)
 
 ```bash
-dspytools run predict <signature> -i <key>=<val>  # Standard prediction
-dspytools run cot <signature> -i <key>=<val>     # Chain-of-thought
-dspytools run react <signature> -i <key>=<val>    # ReAct agent (structured history + typed submit)
+dspytools run predict <signature> -i <key>=<val>  # Standard prediction (--stream tokens)
+dspytools run cot <signature> -i <key>=<val>     # Chain-of-thought (--stream tokens)
+dspytools run react <signature> -i <key>=<val>    # ReAct agent (--parallel-tools, --resume-history <path>)
 dspytools run react-v2 <signature> -i <key>=<val>  # Legacy alias — now identical to `run react`
 dspytools run pot <signature> -i <key>=<val>     # Program-of-Thought style (RLM-backed)
 dspytools run code-act <signature> -i <key>=<val>  # CodeAct style (RLM-backed with tools)
@@ -527,8 +527,8 @@ dspytools compile better-together <module> <trainset>
 dspytools compile ensemble -m module1 -m module2
 dspytools compile finetune <module> <trainset>
 
-# RL-based
-dspytools compile grpo <module> <trainset>
+# RL-based (finetune-only: needs a finetune-capable LM, not a local llama.cpp endpoint)
+dspytools compile grpo <module> <trainset> --max-steps 100
 
 # Agent-based
 dspytools compile avatar <module> <trainset>
@@ -546,6 +546,12 @@ dspytools compile status <job-id>
 dspytools compile list
 dspytools compile cancel <job-id>
 ```
+
+Every optimizer splits the holdout **before** the optimizer is constructed and
+compiles on the train split only; GEPA/MIPROv2 valsets are carved from that train
+split. `gepa --gepa-skills` feeds the skills library to `InstructionProposer`,
+`simba --bsize/--max-steps` works on small datasets, and `submit better-together`
+runs the async BetterTogether job.
 
 ### Agents (`agent`)
 
@@ -569,7 +575,8 @@ dspytools tool python-interpreter        # Start Python sandbox
 ### Evaluation (`evaluate`)
 
 ```bash
-dspytools evaluate run <module> <devset>     # Evaluate module
+dspytools evaluate run <module> <devset>     # Evaluate (module: run-id or program.json)
+dspytools evaluate run <run-id> -d dev.json --answer-field output  # Pick the graded field
 dspytools evaluate list-metrics         # List available metrics
 ```
 
@@ -632,7 +639,7 @@ dspytools export info <run-id>          # Show export info
 ### Hot-Swap Server (`server`)
 
 ```bash
-dspytools server start --api          # Start FastAPI server
+dspytools server start --api          # Start FastAPI server (GET /health -> lm_configured, active_program)
 dspytools server stop              # Stop server
 dspytools server restart            # Restart server
 dspytools server status             # Check status
@@ -801,7 +808,7 @@ dspytools/
 │  ├── api/ (1)        ← FastAPI hot-swap server
 │  ├── config/ (2)       ← Config: settings (hot-reload, env var overrides), env
 │  └── cli/ (3)        ← Rich output utilities (llm_help, output, rich_config)
-├── tests/ (25 files)      ← 369 hermetic tests (DummyLM only, zero live-LLM dependency)
+├── tests/ (31 files)      ← 487 hermetic tests (DummyLM only, zero live-LLM dependency)
 ├── docker-compose.redis.yml  ← Redis Stack + FalkorDB container
 ├── AGENTS.md          ← DOX framework root
 ├── pyproject.toml       ← UV project + pyright + pytest config

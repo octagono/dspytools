@@ -210,26 +210,36 @@ def _resolve_safe_types(specs: tuple[str, ...]) -> list[type] | None:
     restricted unpickling is allowed to load. Returns None when none given."""
     if not specs:
         return None
-    from importlib import import_module
+    from dspytools.core.setup import resolve_safe_types
 
-    resolved: list[type] = []
-    for spec in specs:
-        separator = ":" if ":" in spec else "."
-        module_name, _, attr = spec.rpartition(separator)
-        if not module_name or not attr:
-            raise click.ClickException(
-                f"safe type must be 'module:Class' or 'module.Class', got {spec!r}"
-            )
-        try:
-            obj = getattr(import_module(module_name), attr)
-        except (ImportError, AttributeError) as exc:
-            raise click.ClickException(
-                f"cannot resolve safe type {spec!r}: {exc}"
-            ) from exc
-        if not isinstance(obj, type):
-            raise click.ClickException(f"safe type {spec!r} is not a class")
-        resolved.append(obj)
-    return resolved
+    try:
+        return resolve_safe_types(specs)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _save_cache_config(**changes) -> dict:
+    """Persist DSPy cache intent under ``dspy.cache`` (applied by setup_dspy)."""
+    cfg = load_config()
+    section = cfg.setdefault("dspy", {}).setdefault("cache", {})
+    section.update(changes)
+    save_user_config(cfg)
+    return section
+
+
+def _format_cache_config(section: dict) -> list[str]:
+    defaults = {
+        "enable_disk_cache": True,
+        "enable_memory_cache": True,
+        "disk_size_limit_bytes": None,
+        "safe_types": [],
+    }
+    effective = {**defaults, **section}
+    lines = [
+        f"  {k}: {v if v is not None else 'default'}" for k, v in effective.items()
+    ]
+    lines.append("  restrict_pickle: True (project contract, not configurable)")
+    return lines
 
 
 @cache_cmd.command(name="enable", cls=LLMCommand)
@@ -243,36 +253,71 @@ def _resolve_safe_types(specs: tuple[str, ...]) -> list[type] | None:
         "e.g. dspy.signatures.field.InputField"
     ),
 )
-def cache_enable(safe_types: tuple[str, ...]):
-    """Enable DSPy cache with secure (restricted) pickle loading."""
-    from dspytools.core._dspy import dspy
+@click.option(
+    "--disk-size-limit",
+    type=int,
+    default=None,
+    help="Disk cache size limit in bytes (DSPy default: 30 GB)",
+)
+def cache_enable(safe_types: tuple[str, ...], disk_size_limit: int | None):
+    """Enable DSPy caching (disk + memory, restricted pickle).
 
-    dspy.configure_cache(
-        restrict_pickle=True, safe_types=_resolve_safe_types(safe_types)
-    )
-    click.echo("  Cache enabled (restricted pickle)")
+    Persisted under `dspy.cache` and applied on the next `setup_dspy()`.
+    """
+    resolved = _resolve_safe_types(safe_types)
+    changes: dict = {"enable_disk_cache": True, "enable_memory_cache": True}
+    if resolved:
+        changes["safe_types"] = [f"{c.__module__}:{c.__qualname__}" for c in resolved]
+    if disk_size_limit is not None:
+        changes["disk_size_limit_bytes"] = disk_size_limit
+    _save_cache_config(**changes)
+    click.echo("  Cache enabled (disk + memory, restricted pickle)")
+    for line in _format_cache_config(load_config().get("dspy", {}).get("cache", {})):
+        click.echo(line)
 
 
 @cache_cmd.command(name="disable", cls=LLMCommand)
 def cache_disable():
-    """Allow unrestricted (unsafe) pickle loading from cache entries."""
-    from dspytools.core._dspy import dspy
+    """Disable DSPy disk and memory caching (restricted pickle stays on)."""
+    _save_cache_config(enable_disk_cache=False, enable_memory_cache=False)
+    click.echo("  Cache disabled (disk + memory); restricted pickle unchanged")
+    click.echo("  Applies on the next dspytools command (setup_dspy reads it)")
 
-    dspy.configure_cache(restrict_pickle=False)
-    click.echo("  Restricted pickle disabled (unrestricted cache loading)")
+
+@cache_cmd.command(name="show", cls=LLMCommand)
+def cache_show():
+    """Show persisted DSPy cache settings and cache locations."""
+    from dspytools.core._dspy import dspy
+    from dspytools.config.settings import cache_dir
+
+    click.echo("  Persisted (dspy.cache):")
+    for line in _format_cache_config(load_config().get("dspy", {}).get("cache", {})):
+        click.echo(line)
+    click.echo(f"  analysis cache dir: {cache_dir()}")
+    click.echo(f"  LM cache dir: {getattr(dspy.clients, 'DISK_CACHE_DIR', None)}")
 
 
 @cache_cmd.command(name="clear", cls=LLMCommand)
 def cache_clear():
-    """Clear the DSPy cache directory."""
+    """Clear dspytools' analysis cache and DSPy's LM cache."""
+    from dspytools.core._dspy import dspy
     from dspytools.config.settings import cache_dir
 
-    cdir = cache_dir()
-    if cdir.exists():
-        shutil.rmtree(cdir)
-        click.echo(f"  Cache cleared: {cdir}")
-    else:
-        click.echo("  No cache found")
+    targets = [
+        ("analysis", cache_dir()),
+        ("LM", getattr(dspy.clients, "DISK_CACHE_DIR", None)),
+    ]
+    for label, path in targets:
+        if path is None:
+            click.echo(f"  {label} cache: DSPy DISK_CACHE_DIR is unset — skipped")
+            continue
+        path = Path(path)
+        if not path.exists():
+            click.echo(f"  {label} cache: {path} (not present)")
+            continue
+        removed = sum(1 for _ in path.iterdir())
+        shutil.rmtree(path)
+        click.echo(f"  {label} cache cleared: {path} ({removed} entries removed)")
 
 
 @configure_cmd.group(name="dspy")
@@ -375,8 +420,12 @@ def dspy_show():
     cfg = load_config()
     dspy_cfg = cfg.get("dspy", {})
 
+    # The effective defaults for keys the user has not set. All but one are
+    # DSPy's own; ``track_usage`` is a project default applied by
+    # ``core.setup._default_track_usage()`` so real token/cost accounting works
+    # out of the box (see ``core.cost_tracker.usage_from_result``).
     defaults = {
-        "track_usage": False,
+        "track_usage": True,
         "async_max_workers": 8,
         "num_threads": 8,
         "max_errors": 10,
@@ -384,12 +433,17 @@ def dspy_show():
         "max_history_size": 10000,
         "allow_tool_async_sync_conversion": False,
         "provide_traceback": False,
-        "warn_on_type_mismatch": False,
+        "warn_on_type_mismatch": True,
     }
 
     for k, default in defaults.items():
         current = dspy_cfg.get(k, default)
-        marker = " (custom)" if k in dspy_cfg else ""
+        if k in dspy_cfg:
+            marker = " (set)"
+        elif k == "track_usage":
+            marker = " (project default)"
+        else:
+            marker = " (dspy default)"
         click.echo(f"  {k}: {current}{marker}")
 
     click.echo(f"  model_type: {dspy_cfg.get('model_type', 'chat')}")

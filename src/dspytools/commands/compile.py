@@ -41,6 +41,7 @@ from dspytools.core.metrics import (
     exact_match_metric,
     gepa_metric,
     gepa_metric_cost_aware,
+    gepa_metric_float,
 )
 from dspytools.core.mlflow_tracker import get_tracker
 from dspytools.core.output import create_run_dir, save_program
@@ -223,6 +224,7 @@ def _gepa_cli_kwargs(
     perfect_score: float,
     track_stats: bool,
     track_best_outputs: bool,
+    gepa_skills: bool = False,
 ) -> dict[str, Any]:
     """Collect GEPA constructor kwargs chosen on the command line."""
     selected = _gepa_ctor_kwargs(
@@ -235,7 +237,166 @@ def _gepa_cli_kwargs(
     )
     # Explicit --gepa-kwarg wins over the named options.
     selected.update(_parse_gepa_ctor_kwargs(gepa_kwarg))
+    if gepa_skills:
+        selected["instruction_proposer"] = _instruction_proposer()
     return selected
+
+
+def _instruction_proposer() -> Any:
+    """Build GEPA's ``InstructionProposer`` over the local skills library.
+
+    ``~/.config/dspytools/skills/*/SKILL.md`` is exactly the directory layout
+    ``InstructionProposer(skills=...)`` consumes, so the teacher's reflections
+    get the mined Trace2Skill patterns as priors. ``truncate_history_outputs``
+    keeps the reflection prompt inside the budget of a small reflection model.
+    """
+    from dspy.teleprompt.gepa.instruction_proposal import InstructionProposer
+
+    from dspytools.config.settings import skills_dir
+
+    skills_path = skills_dir()
+    if not skills_path.exists():
+        raise click.ClickException(
+            f"no skills library at {skills_path} — create one with `dspytools skills create`"
+        )
+    return InstructionProposer(
+        skills=skills_path,
+        max_chars=2000,
+        truncate_history_outputs=True,
+    )
+
+
+def _json_safe_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Filter optimizer params down to values that can be logged as JSON.
+
+    ``run_params`` carries live objects (``reflection_lm`` is a ``dspy.LM``,
+    ``gepa_kwargs`` may hold callables). Splatting them into
+    ``register_run_with_lineage``/``log_compile`` wrote ``"<LM repr>"`` into
+    ``compiled/index.json`` and the MLflow run params.
+    """
+    safe: dict[str, Any] = {}
+    for key, value in params.items():
+        if value is None or isinstance(value, (str, int, float, bool)):
+            safe[key] = value
+            continue
+        if isinstance(value, (list, tuple, dict)):
+            try:
+                json.dumps(value)
+            except (TypeError, ValueError):
+                continue
+            safe[key] = list(value) if isinstance(value, tuple) else value
+    return safe
+
+
+def _optimizer_run_params(spec_params: dict[str, Any]) -> dict[str, Any]:
+    """Copy a spec's ``params`` dict for one command invocation.
+
+    The spec dicts live for the life of the process (they are captured when the
+    Click commands are registered), so writing into them leaked a
+    ``reflection_lm`` from one invocation into the next.
+    """
+    return dict(spec_params)
+
+
+def _valset_split(dataset: list, min_train: int = 2) -> tuple[list, list | None]:
+    """Split a validation slice off ``dataset`` without starving the optimizer.
+
+    Returns ``(train, valset_or_None)``. Small datasets keep everything for
+    training — GEPA/MIPROv2 fall back to their own internal split.
+    """
+    if len(dataset) >= 6:
+        val_size = max(3, len(dataset) // 5)
+        train = dataset[:-val_size]
+        if len(train) >= min_train:
+            return train, dataset[-val_size:]
+    return list(dataset), None
+
+
+def _detailed_results_score(compiled: Any, default: float = 0.5) -> float:
+    """Best validation score from ``compiled.detailed_results`` (GEPA stats).
+
+    Returns ``default`` when ``track_stats`` was off or the optimizer does not
+    attach detailed results — that placeholder used to be the only value
+    recorded for every compile.
+    """
+    details = getattr(compiled, "detailed_results", None)
+    if details is None:
+        return default
+    scores = getattr(details, "val_aggregate_scores", None)
+    if not scores:
+        return default
+    best_idx = getattr(details, "best_idx", None)
+    try:
+        if isinstance(best_idx, int) and 0 <= best_idx < len(scores):
+            return float(scores[best_idx])
+        return float(max(scores))
+    except (TypeError, ValueError):
+        return default
+
+
+def _instrument_metric(
+    metric: Callable[..., float], val_field: str = "output"
+) -> tuple[Callable[..., float], dict[str, Any]]:
+    """Wrap a metric so a compile can report how many traces it accepted.
+
+    Bootstrap-based optimizers silently emit an *uncompiled* program when the
+    metric accepts zero demos; the returned stats let the caller say so out loud
+    (metric name + one sample mismatch) instead of reporting success.
+    """
+    stats: dict[str, Any] = {
+        "scored": 0,
+        "matched": 0,
+        "first_mismatch": None,
+        "name": getattr(metric, "__name__", type(metric).__name__),
+    }
+
+    def observed(example: Any, prediction: Any, trace: Any = None) -> float:
+        score = metric(example, prediction, trace)
+        stats["scored"] += 1
+        if score >= 1.0:
+            stats["matched"] += 1
+        elif stats["first_mismatch"] is None:
+            stats["first_mismatch"] = (
+                getattr(example, val_field, None),
+                getattr(prediction, val_field, None),
+            )
+        return score
+
+    return observed, stats
+
+
+def _warn_if_no_bootstrap(stats: dict[str, Any] | None, optimizer: str) -> None:
+    """Warn when a bootstrap compile accepted zero traces (no demos learned)."""
+    if not stats or not stats["scored"] or stats["matched"]:
+        return
+    gold, pred = stats["first_mismatch"] or (None, None)
+    click.echo(
+        f"  Warning: {optimizer} bootstrapped 0/{stats['scored']} successful traces "
+        f"({stats.get('name', 'metric')}) — the compiled program carries no demos. "
+        f"Sample mismatch: expected {gold!r}, got {pred!r}.",
+        err=True,
+    )
+
+
+def _require_finetune_capable_lm(lm: Any, module_name: str, trainset_path: str) -> None:
+    """Fail fast when the student LM has no provider fine-tuning API.
+
+    Local llama.cpp endpoints (``localhost``/``127.0.0.1``) cannot accept a
+    fine-tuning upload, so BootstrapFinetune/GRPO would die inside the provider
+    call with a confusing auth error.
+    """
+    api_base = lm.kwargs.get("api_base", "")
+    if api_base and ("localhost" in api_base or "127.0.0.1" in api_base):
+        raise click.ClickException(
+            "this optimizer needs a provider with a fine-tuning API "
+            "(OpenAI, Together, etc).\n"
+            f"  Current api_base: {api_base} (local endpoint — no fine-tuning upload).\n"
+            "  For local model weight optimization, use the LoRA distillation pipeline:\n"
+            "    dspytools distill run --module {m} --trainset {t}\n"
+            "    dspytools lora train --data output/<jsonl>".format(
+                m=module_name, t=trainset_path
+            )
+        )
 
 
 def _build_gepa(metric: Any, **kwargs: Any) -> Any:
@@ -259,10 +420,23 @@ def _build_gepa(metric: Any, **kwargs: Any) -> Any:
     if ctor.get("track_best_outputs"):
         # dspy asserts track_stats whenever track_best_outputs is requested.
         ctor.setdefault("track_stats", True)
-    if "max_metric_calls" in ctor or "max_full_evals" in ctor:
-        ctor.pop("auto", None)
-    else:
-        ctor.setdefault("auto", "light")
+    # dspy.GEPA asserts exactly one of auto / max_metric_calls / max_full_evals.
+    # Two explicit budgets used to reach that bare assert (a crash, not a CLI
+    # error), so resolve the conflict here.
+    budgets = {
+        name: ctor[name]
+        for name in ("auto", "max_metric_calls", "max_full_evals")
+        if ctor.get(name) is not None
+    }
+    if len(budgets) > 1:
+        raise click.ClickException(
+            "conflicting GEPA budgets: "
+            + ", ".join(sorted(budgets))
+            + " — auto, max_metric_calls and max_full_evals are mutually exclusive"
+            " (pass at most one; omitting all three uses auto='light')"
+        )
+    if not budgets:
+        ctor["auto"] = "light"
 
     return dspy.GEPA(metric=metric, **ctor)
 
@@ -297,6 +471,10 @@ _GEPA_KNOB_OPTIONS: dict[str, dict[str, Any]] = {
     "--gepa-kwarg": {
         "multiple": True,
         "help": "Any dspy.GEPA constructor kwarg as key=value (values JSON-parsed)",
+    },
+    "--gepa-skills/--no-gepa-skills": {
+        "default": False,
+        "help": "Feed the local skills library to GEPA's InstructionProposer",
     },
 }
 
@@ -354,7 +532,7 @@ def compile_cmd():
 
 def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs):
     """Generate a Click command for a simple optimizer."""
-    extra_params = kwargs.get("params", {})
+    spec_params = kwargs.get("params", {})
     module_type = kwargs.get("module_type", "predict")
     run_dir = kwargs.get("run_dir", name)
     needs_teacher = kwargs.get("needs_teacher", False)
@@ -379,11 +557,16 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
         perfect_score: float = 1.0,
         track_stats: bool = False,
         track_best_outputs: bool = False,
+        gepa_skills: bool = False,
+        bsize: int | None = None,
+        max_steps: int | None = None,
     ):
         setup_dspy()
         student = load_module_by_name(module_name)
-        trainset = load_trainset(trainset_path)
-        dataset_hash = compute_dataset_hash(trainset)
+        # `total_trainset` is the real dataset; the optimizer only ever sees the
+        # gate's train split.
+        total_trainset = load_trainset(trainset_path)
+        dataset_hash = compute_dataset_hash(total_trainset)
 
         # Compile dedup: skip if exact same config was already compiled
         if not force:
@@ -393,31 +576,49 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
                 click.echo("  Use --force to force recompilation")
                 return
 
+        # ── Holdout split FIRST (Golden Rule 3) ─────────────────────────
+        # The gate's holdout must never reach an optimizer input — including
+        # GEPA's/MIPROv2's valset. Splitting after the compile (the old order)
+        # meant the optimizer trained on the exact examples used to "validate".
+        gate = get_holdout_gate()
+        run_id, run_path = create_run_dir(run_dir, label)
+        train_set, holdout = gate.split(total_trainset, compile_id=run_id)
+        if not train_set:  # degenerate 1-example dataset: no split possible
+            train_set = list(total_trainset)
+
+        # Per-invocation copy of the registry's params — never mutate the spec.
+        run_params = _optimizer_run_params(spec_params)
+        metric: Callable[..., Any] = exact_match_metric()
+        metric_stats: dict[str, Any] | None = None
+
         if draft:
             # Speculative compilation: student drafts, teacher polishes
             pipeline = GFLPipeline()
             result = pipeline.compile_draft(
-                student=student, trainset=trainset, optimizer_name=name
+                student=student, trainset=train_set, optimizer_name=name
             )
             compiled = result["best_program"]
             click.echo(
                 f"  Draft score: {result['draft_score']:.4f} | Polished: {result['polished_score']:.4f}"
             )
         else:
-            metric = gepa_metric if name == "gepa" else exact_match_metric()
+            if name == "gepa":
+                metric = gepa_metric
+            else:
+                metric, metric_stats = _instrument_metric(metric)
 
             if needs_teacher:
                 teacher = LMRegistry.get_teacher()
                 if teacher is None:
                     click.echo("  No teacher LM configured", err=True)
                     raise click.Abort()
-                extra_params["reflection_lm"] = teacher
+                run_params["reflection_lm"] = teacher
 
             # GEPA: forward --use-mlflow, --gepa-kwargs and the GEPA knobs
             if name == "gepa":
-                extra_params["gepa_kwargs"] = _parse_gepa_kwargs(gepa_kwargs)
-                extra_params["use_mlflow"] = use_mlflow
-                extra_params.update(
+                run_params["gepa_kwargs"] = _parse_gepa_kwargs(gepa_kwargs)
+                run_params["use_mlflow"] = use_mlflow
+                run_params.update(
                     _gepa_cli_kwargs(
                         gepa_kwarg=gepa_kwarg,
                         seed=seed,
@@ -426,36 +627,52 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
                         perfect_score=perfect_score,
                         track_stats=track_stats,
                         track_best_outputs=track_best_outputs,
+                        gepa_skills=gepa_skills,
                     )
                 )
 
-            opt = cls_lambda(metric=metric, trainset=trainset, **extra_params)
+            # SIMBA needs `bsize` examples per step: derive a workable default
+            # from the data instead of erroring out below 32 examples.
+            if name == "simba":
+                run_params["bsize"] = bsize or max(1, min(32, len(train_set)))
+                run_params["max_steps"] = max_steps or 8
+                if len(train_set) < run_params["bsize"]:
+                    raise click.ClickException(
+                        f"simba requires at least {run_params['bsize']} training "
+                        f"examples (got {len(train_set)} after the holdout split)"
+                    )
+
+            opt = cls_lambda(metric=metric, trainset=train_set, **run_params)
+
             # KNNFewShot consumes trainset in __init__, not compile()
             compile_kwargs: dict[str, Any] = {"student": student}
             if "knn" not in name:
-                compile_kwargs["trainset"] = trainset
-            # GEPA needs a separate valset to avoid overfitting warning
-            if "gepa" in name and len(trainset) >= 6:
-                val_size = max(3, len(trainset) // 5)  # 20% or at least 3
-                compile_kwargs["valset"] = trainset[-val_size:]
-                compile_kwargs["trainset"] = trainset[:-val_size]
-            # BetterTogether wraps GEPA internally — same valset split
-            if "better-together" in name and len(trainset) >= 6:
-                val_size = max(3, len(trainset) // 5)
-                compile_kwargs["valset"] = trainset[-val_size:]
-                compile_kwargs["trainset"] = trainset[:-val_size]
+                compile_kwargs["trainset"] = train_set
+            # GEPA (and BetterTogether's GEPA stage) need a separate valset; it
+            # comes out of the train split, never out of the holdout.
+            if name.startswith("gepa") or name == "better-together":
+                gepa_train, gepa_valset = _valset_split(train_set)
+                compile_kwargs["trainset"] = gepa_train
+                if gepa_valset:
+                    compile_kwargs["valset"] = gepa_valset
+            # MIPROv2 hands 80% of the trainset to validation when no valset is
+            # given, leaving 2-4 examples for demo construction on small sets.
+            if name == "mipro":
+                mipro_train, mipro_valset = _valset_split(train_set)
+                compile_kwargs["trainset"] = mipro_train
+                compile_kwargs["valset"] = (
+                    mipro_valset or list(mipro_train[-1:]) or list(train_set)
+                )
+                # upstream MIN_MINIBATCH_SIZE is 50
+                compile_kwargs["minibatch"] = len(mipro_train) > 50
+                compile_kwargs["max_bootstrapped_demos"] = min(4, len(mipro_train))
+                compile_kwargs["max_labeled_demos"] = min(16, len(mipro_train))
             # COPRO requires eval_kwargs
             if "copro" in name:
                 compile_kwargs["eval_kwargs"] = {"num_threads": 4}
             # BootstrapFewShotWithOptuna requires the demo cap at compile time
             if "optuna" in name:
                 compile_kwargs["max_demos"] = 4
-            # SIMBA requires at least bsize examples
-            if "simba" in name and len(trainset) < opt.bsize:
-                fail(f"SIMBA needs ≥{opt.bsize} examples, got {len(trainset)}")
-                raise click.ClickException(
-                    f"SIMBA requires at least {opt.bsize} training examples"
-                )
             compiled, retry_stats = compile_with_retry(
                 lambda: opt.compile(**compile_kwargs),
                 max_retries=3,
@@ -465,13 +682,14 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
                 click.echo(
                     f"  Retries: {retry_stats['retries']} (total delay: {retry_stats['total_delay']:.1f}s)"
                 )
+            _warn_if_no_bootstrap(metric_stats, name)
 
         # Cost tracking (approximate based on trainset size and optimizer).
         # Single canonical path: one estimate → one CompileCost.add_call →
         # TokenUsage.estimate. DSPy's Usage totals already fold cached, tool-use
         # and reasoning/audio tokens into prompt/completion counts, so no extra
         # counters are added here (that would double-count).
-        est_tokens, _ = _estimate_optimizer_cost(name, len(trainset))
+        est_tokens, _ = _estimate_optimizer_cost(name, len(total_trainset))
 
         cost = CompileCost(compile_id="", optimizer=name)
         cost.add_call(
@@ -481,23 +699,29 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
         )
         cost.finish()
 
-        # MLflow tracking
+        # Real score when the optimizer attached stats (GEPA --track-stats);
+        # 0.5 stays the documented fallback for optimizers that report nothing.
+        compile_score = _detailed_results_score(compiled)
+
+        # MLflow tracking — JSON-safe params only (no live LM objects)
+        logged_params = _json_safe_params(run_params)
 
         tracker = get_tracker()
         tracker.log_compile(
             optimizer=name,
             module=module_name,
-            score=0.5,  # placeholder — actual evaluation would need trainset
-            params=extra_params,
-            metrics={"tokens": cost.total_tokens, "cost_usd": cost.total_cost},
+            score=compile_score,
+            params=logged_params,
+            metrics={
+                "tokens": cost.total_tokens,
+                "cost_usd": cost.total_cost,
+                "trainset_size": len(total_trainset),
+                "train_split_size": len(train_set),
+                "holdout_size": len(holdout),
+            },
         )
 
-        run_id, run_path = create_run_dir(run_dir, label)
-
         # Holdout gate validation (Invariant 5: holdout never seen by optimizer)
-
-        gate = get_holdout_gate()
-        train_set, _ = gate.split(trainset, compile_id=run_id)
         validation = gate.validate_gate(run_id, compiled)
         if not validation["accepted"]:
             click.echo(
@@ -513,7 +737,14 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
         )
         register_run_with_lineage(
             run_id,
-            {"optimizer": name, "module": module_name, **extra_params},
+            {
+                "optimizer": name,
+                "module": module_name,
+                "score": validation.get("score", compile_score),
+                "trainset_size": len(total_trainset),
+                "holdout_size": len(holdout),
+                **logged_params,
+            },
             optimizer=name,
             dataset_hash=dataset_hash,
             base_program_id=module_name,
@@ -524,6 +755,8 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
             module=module_name,
             run_id=run_id,
             score=validation.get("score", 0.5),
+            trainset_size=len(total_trainset),
+            holdout_size=len(holdout),
             tokens=cost.total_tokens,
             cost_usd=cost.total_cost,
             duration_s=cost.elapsed_seconds,
@@ -539,7 +772,7 @@ def _make_optimizer_cmd(name: str, cls_name: str, cls_lambda: Callable, **kwargs
         profile = engine.morphology.profile_task(
             description=module_name,
             field_count=2,
-            data_size=len(trainset),
+            data_size=len(total_trainset),
         )
         engine.on_compile(
             task_profile=profile,
@@ -609,14 +842,30 @@ _OPTIMIZER_SPECS = {
     },
     "simba": {
         "cls_name": "SIMBA",
-        "cls_lambda": lambda metric, **kw: dspy.SIMBA(metric=metric),
+        "cls_lambda": lambda metric, **kw: dspy.SIMBA(
+            metric=metric,
+            bsize=kw.pop("bsize", 32),
+            max_steps=kw.pop("max_steps", 8),
+        ),
         "params": {},
+        "extra_options": {
+            "--bsize": {
+                "type": int,
+                "default": None,
+                "help": "Examples sampled per SIMBA step (default: min(32, dataset size))",
+            },
+            "--max-steps": {
+                "type": int,
+                "default": None,
+                "help": "SIMBA optimization steps (default: 8)",
+            },
+        },
     },
     "bootstrap-few-shot": {
         "cls_name": "BootstrapFewShot",
-        "cls_lambda": lambda metric, **kw: dspy.BootstrapFewShot(
-            metric=metric, max_labeled_demos=4, max_bootstrapped_demos=4
-        ),
+        # Demo caps stay at DSPy's defaults (max_labeled_demos=16,
+        # max_bootstrapped_demos=4); pinning both to 4 dropped the labeled budget.
+        "cls_lambda": lambda metric, **kw: dspy.BootstrapFewShot(metric=metric),
         "params": {},
     },
     "bootstrap-few-shot-random": {
@@ -696,6 +945,7 @@ def compile_submit(
     perfect_score: float = 1.0,
     track_stats: bool = False,
     track_best_outputs: bool = False,
+    gepa_skills: bool = False,
 ):
     """Submit a background compile job. Returns job_id for polling."""
 
@@ -732,7 +982,17 @@ def compile_submit(
             metric=exact_match_metric(),
             auto=auto,
         )
-        compiled = opt.compile(student=student, trainset=trainset)
+        # Explicit valset: without one MIPROv2 hands 80% of the trainset to
+        # validation, leaving almost nothing for demo construction.
+        mipro_train, mipro_valset = _valset_split(trainset)
+        compiled = opt.compile(
+            student=student,
+            trainset=mipro_train,
+            valset=mipro_valset or list(mipro_train[-1:]),
+            minibatch=len(mipro_train) > 50,
+            max_bootstrapped_demos=min(4, len(mipro_train)),
+            max_labeled_demos=min(16, len(mipro_train)),
+        )
         run_id, run_path = create_run_dir("mipro", label)
         save_program(
             run_path,
@@ -763,6 +1023,7 @@ def compile_submit(
                 perfect_score=perfect_score,
                 track_stats=track_stats,
                 track_best_outputs=track_best_outputs,
+                gepa_skills=gepa_skills,
             ),
         )
         # Split valset to avoid GEPA overfitting warning
@@ -786,10 +1047,39 @@ def compile_submit(
         )
         return run_id
 
+    def _run_better_together() -> str:
+        # BetterTogether evaluates with its own metric via dspy.Evaluate, which
+        # sums scores — the plain-float metric is required there. Its GEPA stage
+        # keeps the feedback-returning metric for reflection.
+        student.set_lm(LMRegistry.get_or_default())
+        opt = dspy.BetterTogether(
+            metric=gepa_metric_float,
+            p=_build_gepa(gepa_metric, auto=auto, reflection_lm=teacher),
+        )
+        bt_train, bt_valset = _valset_split(trainset)
+        compile_kwargs = {"student": student, "trainset": bt_train, "strategy": "p"}
+        if bt_valset:
+            compile_kwargs["valset"] = bt_valset
+        compiled = opt.compile(**compile_kwargs)
+        run_id, run_path = create_run_dir("better_together", label)
+        save_program(
+            run_path,
+            compiled,
+            {"inputs": ["input"], "outputs": ["output"]},
+            module_type="predict",
+        )
+        register_run_with_graph(
+            run_id,
+            {"optimizer": "better_together", "module": module_name, "auto": auto},
+            optimizer="better_together",
+        )
+        return run_id
+
     runners = {
         "knn": _run_knn,
         "mipro": _run_mipro,
         "gepa": _run_gepa,
+        "better-together": _run_better_together,
     }
 
     job_id = CompileScheduler.submit(optimizer, module_name, runners[optimizer], label)
@@ -836,6 +1126,7 @@ def compile_flex(
     perfect_score: float = 1.0,
     track_stats: bool = False,
     track_best_outputs: bool = False,
+    gepa_skills: bool = False,
 ):
     """Optimize a module's implementation code with dspy.Flex + GEPA.
 
@@ -892,6 +1183,7 @@ def compile_flex(
                 perfect_score=perfect_score,
                 track_stats=track_stats,
                 track_best_outputs=track_best_outputs,
+                gepa_skills=gepa_skills,
             ),
         )
         # Split valset to avoid GEPA overfitting warning
@@ -1032,7 +1324,9 @@ def compile_bt(module_name: str, trainset_path: str, strategy: str, label: str |
     student.set_lm(LMRegistry.get_or_default())
 
     bt = dspy.BetterTogether(
-        metric=gepa_metric,
+        # dspy.Evaluate (BetterTogether's scorer) sums metric returns, so the
+        # float variant is required here; GEPA's own stage keeps the feedback one.
+        metric=gepa_metric_float,
         p=_build_gepa(gepa_metric, auto="light", reflection_lm=teacher),
     )
     # Split valset to avoid GEPA overfitting warning
@@ -1051,7 +1345,7 @@ def compile_bt(module_name: str, trainset_path: str, strategy: str, label: str |
     tracker.log_compile(
         optimizer="better_together",
         module=module_name,
-        score=0.5,
+        score=_detailed_results_score(compiled),
         params={"strategy": strategy},
     )
 
@@ -1136,18 +1430,7 @@ def compile_finetune(
 
     # BootstrapFinetune uploads training data to the provider's fine-tuning API.
     # Local LLM endpoints (llama-cpp-server) don't expose a fine-tuning upload API.
-    # Check api_base before attempting — prevents a confusing auth/upload error.
-    api_base = student_lm.kwargs.get("api_base", "")
-    if api_base and ("localhost" in api_base or "127.0.0.1" in api_base):
-        raise click.ClickException(
-            "BootstrapFinetune requires a provider with a fine-tuning API (OpenAI, Together, etc).\n"
-            f"  Current api_base: {api_base} (local endpoint — does not support fine-tuning uploads).\n"
-            "  For local model weight optimization, use the LoRA distillation pipeline:\n"
-            "    dspytools distill run --module {m} --trainset {t}\n"
-            "    dspytools lora train --data output/<jsonl>".format(
-                m=module_name, t=trainset_path
-            )
-        )
+    _require_finetune_capable_lm(student_lm, module_name, trainset_path)
 
     # dspy.BootstrapFinetune has no num_iters kwarg: training hyper-parameters go
     # to the provider through train_kwargs (num_iters → n_epochs).
@@ -1163,7 +1446,7 @@ def compile_finetune(
     tracker.log_compile(
         optimizer="bootstrap_finetune",
         module=module_name,
-        score=0.5,
+        score=_detailed_results_score(compiled),
         params={"num_iters": num_iters},
     )
 
@@ -1404,36 +1687,50 @@ def compile_gfl(
 @compile_cmd.command(name="grpo", cls=LLMCommand)
 @click.argument("module_name")
 @click.argument("trainset_path")
-@click.option("--lora/--no-lora", default=False, help="Use LoRA adapter training")
-@click.option("--beta", default=0.01, type=float, help="KL penalty coefficient")
-@click.option("--max-steps", default=10, type=int, help="Max optimization steps")
+@click.option(
+    "--max-steps", default=10, type=int, help="GRPO train steps (num_train_steps)"
+)
+@click.option("--num-rollouts", default=1, type=int, help="Rollouts per GRPO step")
+@click.option(
+    "--num-threads",
+    default=1,
+    type=int,
+    help="Rollout parallelism (1 for a local model)",
+)
 @label_option
 def compile_grpo(
     module_name: str,
     trainset_path: str,
-    lora: bool,
-    beta: float,
     max_steps: int,
+    num_rollouts: int,
+    num_threads: int,
     label: str | None,
 ):
-    """Compile with GRPO (RL-based pipeline optimization).
+    """Compile with GRPO (RL-based optimization via LM fine-tuning).
 
-    GRPO treats the entire agent pipeline as a single policy and optimizes
-    end-to-end with reinforcement learning. Combined with GEPA via
-    BetterTogether, yields 5-11% improvement (arXiv:2508.04660).
-    Falls back to BetterTogether(GEPA sequential) if GRPO module unavailable.
+    GRPO treats the program as a single policy and updates its predictor LMs
+    through ``LM.finetune()``. That requires a provider with a fine-tuning API
+    (OpenAI/Together/etc); local llama.cpp endpoints fail fast with a pointer to
+    the LoRA distillation pipeline instead.
     """
 
     setup_dspy()
 
     student = load_module_by_name(module_name)
     trainset = load_trainset(trainset_path)
+    student_lm = LMRegistry.get_or_default()
+    student.set_lm(student_lm)
+    _require_finetune_capable_lm(student_lm, module_name, trainset_path)
 
-    # lazy: GRPO may not be available in all DSPy versions
+    # lazy: GRPO is only exported from dspy.teleprompt.grpo in 3.5
     from dspytools.gfl.grpo import compile_grpo as _grpo_compile
 
     compiled = _grpo_compile(
-        student, trainset, lora=lora, beta=beta, max_steps=max_steps
+        student,
+        trainset,
+        max_steps=max_steps,
+        num_rollouts=num_rollouts,
+        num_threads=num_threads,
     )
 
     # MLflow tracking
@@ -1443,7 +1740,11 @@ def compile_grpo(
         optimizer="grpo",
         module=module_name,
         score=0.5,
-        params={"lora": lora, "beta": beta, "max_steps": max_steps},
+        params={
+            "max_steps": max_steps,
+            "num_rollouts": num_rollouts,
+            "num_threads": num_threads,
+        },
     )
 
     run_id, run_path = create_run_dir("grpo", label)
@@ -1454,7 +1755,13 @@ def compile_grpo(
         module_type="predict",
     )
     register_run_with_graph(
-        run_id, {"optimizer": "grpo", "module": module_name, "lora": lora}
+        run_id,
+        {
+            "optimizer": "grpo",
+            "module": module_name,
+            "max_steps": max_steps,
+            "num_rollouts": num_rollouts,
+        },
     )
     click.echo(f"  GRPO compiled → {run_id}")
 
@@ -1509,7 +1816,7 @@ def compile_avatar(module_name: str, trainset_path: str, label: str | None):
     tracker.log_compile(
         optimizer="avatar",
         module=module_name,
-        score=0.5,
+        score=_detailed_results_score(compiled),
     )
 
     run_id, run_path = create_run_dir("avatar", label)
@@ -1554,6 +1861,9 @@ def compile_distill(
     trainset = load_trainset(trainset_path)
     student_lm = LMRegistry.get_or_default()
     student.set_lm(student_lm)
+    # Step 2 fine-tunes the student LM — same provider requirement as
+    # `compile finetune`, so fail fast on a local llama.cpp endpoint.
+    _require_finetune_capable_lm(student_lm, module_name, trainset_path)
 
     click.echo(f"  Teacher: {teacher}")
     click.echo(f"  Student: {student_lm}")
@@ -1561,7 +1871,7 @@ def compile_distill(
     # Step 1: Teacher optimization (GEPA with reflection_lm)
     click.echo("  [1/2] Teacher optimizing instructions...")
 
-    gepa_opt = _build_gepa(exact_match_metric(), auto=auto, reflection_lm=teacher)
+    gepa_opt = _build_gepa(gepa_metric, auto=auto, reflection_lm=teacher)
     # Split valset to avoid GEPA overfitting warning
     val_size = max(3, len(trainset) // 5) if len(trainset) >= 6 else 0
     gepa_kwargs: dict[str, Any] = {"student": student}
@@ -1572,13 +1882,15 @@ def compile_distill(
         gepa_kwargs["trainset"] = trainset
     optimized = gepa_opt.compile(**gepa_kwargs)
 
-    # Step 2: Student finetuning on optimized prompts
+    # Step 2: Student finetuning on optimized prompts. GEPA's valset is held out
+    # from the fine-tuning data — it exists to score candidates, not to train.
+    finetune_data = gepa_kwargs["trainset"]
     click.echo("  [2/2] Student absorbing via finetune...")
 
     ft_opt = dspy.BootstrapFinetune(
         metric=exact_match_metric(), train_kwargs={"n_epochs": num_iters}
     )
-    distilled = ft_opt.compile(student=optimized, trainset=trainset)
+    distilled = ft_opt.compile(student=optimized, trainset=finetune_data)
 
     # MLflow tracking
 
@@ -1586,7 +1898,7 @@ def compile_distill(
     tracker.log_compile(
         optimizer="distill",
         module=module_name,
-        score=0.5,
+        score=_detailed_results_score(optimized),
         params={
             "teacher_opt": "gepa",
             "student_ft": "bootstrap_finetune",

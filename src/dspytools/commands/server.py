@@ -145,6 +145,17 @@ def server_start(mcp: bool | None, api: bool | None, mcp_port: int, api_port: in
         pid = os.fork()
         if pid == 0:
             _write_pid("api")
+            # Configure the process LM before uvicorn binds: the API serves
+            # /infer from dspy.settings.lm, so an unconfigured process would
+            # answer every request with 503 "No LM is configured".
+            from dspytools.core.setup import setup_dspy
+
+            try:
+                lm = setup_dspy()
+            except Exception as e:  # noqa: BLE001 — surface the startup failure
+                click.echo(f"  Failed to configure LM: {e}", err=True)
+                sys.exit(1)
+            click.echo(f"    LM: {getattr(lm, 'model', 'unknown')}")
             from dspytools.api.server import run_api
 
             run_api(port=api_port)
