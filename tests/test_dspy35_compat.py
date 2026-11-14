@@ -18,6 +18,7 @@ Coverage:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -386,3 +387,62 @@ def test_parse_accepts_baml_section_completion(patched_parsers):
 
     parsed = dspy.JSONAdapter().parse(signature, completion)
     assert parsed["answer"] == "4"
+
+
+# ── 8. compiled-program provenance ──────────────────────────────────────
+
+
+def _write_program(
+    path: Path, version: str | None, *, dependency_map: bool = False
+) -> Path:
+    payload: dict = {"answer.predict": {"demos": []}}
+    if version is not None:
+        payload["metadata"] = (
+            {"dependency_versions": {"python": "3.12", "dspy": version}}
+            if dependency_map
+            else {"dspy_version": version}
+        )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_saved_dspy_version_reads_metadata(tmp_path):
+    from dspytools.core.programs import saved_dspy_version
+
+    assert (
+        saved_dspy_version(_write_program(tmp_path / "p.json", "3.3.0b1")) == "3.3.0b1"
+    )
+    # dspy records it under metadata.dependency_versions on some save paths.
+    assert (
+        saved_dspy_version(
+            _write_program(tmp_path / "d.json", "3.3.0b1", dependency_map=True)
+        )
+        == "3.3.0b1"
+    )
+    assert saved_dspy_version(_write_program(tmp_path / "n.json", None)) is None
+    assert saved_dspy_version(tmp_path / "missing.json") is None
+
+
+def test_is_current_dspy_version(tmp_path):
+    from dspytools.core.programs import is_current_dspy_version
+
+    assert is_current_dspy_version(
+        _write_program(tmp_path / "a.json", "3.5.0"), "3.5.0"
+    )
+    assert not is_current_dspy_version(
+        _write_program(tmp_path / "b.json", "3.3.0b1"), "3.5.0"
+    )
+    # No recorded version: load it rather than refuse — DSPy warns on its own.
+    assert is_current_dspy_version(_write_program(tmp_path / "c.json", None), "3.5.0")
+
+
+def test_stale_help_cache_is_ignored(tmp_path, monkeypatch):
+    """A cache compiled by another DSPy must not be served as help."""
+    from dspytools.help.optimize import AutoCompiler
+
+    cache = _write_program(tmp_path / "compiled.json", "3.3.0b1")
+    monkeypatch.setattr(AutoCompiler, "CACHE_PATH", cache)
+    monkeypatch.setattr(AutoCompiler, "META_PATH", tmp_path / "meta.json")
+
+    assert AutoCompiler.compile_if_needed(cli=None) is None
+    assert not AutoCompiler.is_compiled()

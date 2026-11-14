@@ -22,6 +22,7 @@ This doc owns all files directly in `src/dspytools/core/` and their contracts. T
 | `mojo_bridge.py` | Shared Mojo module loader — `try_load_mojo()` eliminates boilerplate in 3 bridge files |
 | `_embedder.py` | Shared embedder singleton for SemanticCache + MemoryManager |
 | `_io.py` | Atomic JSON read/write utilities |
+| `programs.py` | Compiled-program provenance — reads `metadata.dspy_version` (or `metadata.dependency_versions.dspy`) so callers can refuse a program compiled by another DSPy |
 | `setup.py` | LMRegistry singleton + `setup_dspy()` configuration |
 | `hotswap.py` | LRU-cached program hot-swap with semantic cache integration |
 | `registry.py` | JSON registry with lineage, idempotency, and module source hashing |

@@ -18,6 +18,7 @@ from dspytools.cli.output import console
 from dspytools.core._dspy import dspy
 from dspytools.core._io import read_json
 from dspytools.core.logging_config import get_logger
+from dspytools.core.programs import saved_dspy_version
 from dspytools.core.setup import LMRegistry
 from dspytools.help.context import (
     _build_examples,
@@ -125,7 +126,12 @@ class HelpManager:
         meta = {}
         if compiled and compiler.META_PATH.exists():
             meta = read_json(compiler.META_PATH)
-        return {"compiled": compiled, "cache": str(compiler.CACHE_PATH), **meta}
+        status = {"compiled": compiled, "cache": str(compiler.CACHE_PATH), **meta}
+        if not compiled and compiler.CACHE_PATH.exists():
+            saved = saved_dspy_version(compiler.CACHE_PATH)
+            if saved:
+                status["stale_dspy_version"] = saved
+        return status
 
 
 class SelfOptimizingCLI(LLMGroup):

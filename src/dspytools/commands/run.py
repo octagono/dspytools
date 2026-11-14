@@ -1037,7 +1037,7 @@ def run_parallel(
     sp = rich_spinner()
     with sp:
         sp.add_task("Running modules in parallel...")
-        # build (module, example) pairs for new Parallel API in DSPy 3.3.0b1
+        # build the (module, example) pairs dspy.Parallel consumes
         exec_pairs: list[tuple[Any, Any]] = []
         for sig in modules:
             mod = dspy.ChainOfThought(sig)
@@ -1115,7 +1115,7 @@ def run_cot_hint(
     sp = rich_spinner()
     with sp:
         sp.add_task("Thinking with hint...")
-        # ChainOfThoughtWithHint removed in DSPy 3.3.0b1 — inject hint via instructions
+        # dspy has no ChainOfThoughtWithHint — inject the hint via instructions
         module = dspy.ChainOfThought(signature)
         if hint and module.predict is not None and module.predict.signature is not None:
             module.predict.signature.instructions = f"Hint: {hint}"

@@ -98,6 +98,18 @@ def self_optimize(teacher: bool, force: bool):
         AutoCompiler.clear()
         ok("Cleared existing cache")
 
+    if (
+        not force
+        and AutoCompiler.CACHE_PATH.exists()
+        and not AutoCompiler.is_compiled()
+    ):
+        from dspytools.core.programs import saved_dspy_version
+
+        warn(
+            "Existing cache was compiled by DSPy "
+            f"{saved_dspy_version(AutoCompiler.CACHE_PATH)} — re-compiling"
+        )
+
     if AutoCompiler.is_compiled() and not force:
         info("Help module already compiled. Use --force to re-compile.")
         return

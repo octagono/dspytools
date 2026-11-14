@@ -377,10 +377,9 @@ class RepositoryAnalyzer(dspy.Module):
         self.analyze_structure = dspy.ChainOfThought(AnalyzeCodeStructure)
 
         # Stages 3+4 run on the student LM (Qwen local), which cannot execute
-        # sandboxed code. DSPy's CodeAct/ProgramOfThought were deprecated in
-        # 3.3.1 (removal in 3.5) and always fell back to these ChainOfThought
-        # predictors on the local model anyway — so ChainOfThought is the
-        # primary, non-deprecated structure.
+        # sandboxed code. DSPy's CodeAct/ProgramOfThought are gone upstream and
+        # always fell back to these ChainOfThought predictors on the local model
+        # anyway — so ChainOfThought is the direct structure, not a fallback.
         self.code_analyzer = dspy.ChainOfThought(
             "file_tree, package_files -> usage_examples: str, edge_cases: str"
         )

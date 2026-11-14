@@ -37,6 +37,7 @@ This directory owns the full help pipeline: CLI introspection (context gathering
 ### `optimize.py` — AutoCompiler
 
 - `compile_if_needed()` **must return `None` when no cache exists**. It must not block on first `--help` by triggering a compile. Callers check for `None` and fall through to Click's default help.
+- `compile_if_needed()` **must also return `None` when the cache was compiled by a different DSPy** (`core.programs.is_current_dspy_version`). Saved demos were optimized against another adapter and request path, so loading them degrades help silently; the mismatch logs `help_cache_stale` and `status()` reports `stale_dspy_version`. `is_compiled()` mirrors that check, so `self optimize` recompiles a stale cache without `--force`.
 - `force_compile()` triggers a full re-compile regardless of cache state. Used by `dspytools self optimize`.
 - Cache path: `~/.config/dspytools/help/compiled.json` (from `config.settings.help_cache_path()`). Metadata path: `~/.config/dspytools/help/meta.json` (from `config.settings.help_meta_path()`). `self optimize`/`self status` write/read these same paths.
 - Two optimization modes:
