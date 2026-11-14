@@ -271,12 +271,34 @@ class TestPipelineRunCLI:
         assert len(runs) >= 1
         return runs[0]["id"]
 
-    def test_run_with_composed_pipeline(self):
+    def test_run_with_composed_pipeline(self, monkeypatch):
         """Running a composed pipeline returns output."""
+        from dspytools.core._dspy import dspy
+
         run_id = self._compose_and_get_id("test-run")
-        result = self.runner.invoke(
-            pipeline_cmd, ["run", run_id, "--input", "hello world"]
+
+        # Hermetic: pipeline_run() imports setup_dspy inside the function and
+        # calls it, so the patch target is the source module, not the command.
+        monkeypatch.setattr("dspytools.core.setup.setup_dspy", lambda *a, **k: None)
+
+        class _NullCache:
+            """Cache stand-in: always misses, never stores (no Redis/embedder)."""
+
+            def check(self, _key):
+                return None
+
+            def store(self, *args, **kwargs):
+                return None
+
+        monkeypatch.setattr(
+            "dspytools.core.hotswap.get_semantic_cache", lambda: _NullCache()
         )
+        lm = dspy.utils.DummyLM({"hello world": {"output": "hello world"}})
+
+        with dspy.context(lm=lm, adapter=dspy.ChatAdapter()):
+            result = self.runner.invoke(
+                pipeline_cmd, ["run", run_id, "--input", "hello world"]
+            )
         assert result.exit_code == 0
         assert "Input:" in result.output
         assert "Output:" in result.output

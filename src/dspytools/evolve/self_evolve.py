@@ -659,20 +659,29 @@ class SelfEvolveEngine:
                 score=score,
             )
 
-        # Store optimization lesson in MemoryManager (SSOT: FalkorDB-native memory)
-        from dspytools.memory.manager import get_memory_manager
+        # Store optimization lesson in MemoryManager (SSOT: FalkorDB-native memory).
+        # Best-effort: the lesson is telemetry, so a memory backend that is down
+        # (no graph, no embedding endpoint) must never fail a completed compile.
+        try:
+            from dspytools.memory.manager import get_memory_manager
 
-        memory = get_memory_manager()
-        memory.add(
-            content=f"Optimizer '{optimizer}' scored {score:.2f} on task profile '{task_profile}' (success={success})",
-            user_id="self_evolve_engine",
-            metadata={
-                "task_profile": task_profile,
-                "optimizer": optimizer,
-                "score": score,
-                "success": success,
-            },
-        )
+            memory = get_memory_manager()
+            memory.add(
+                content=f"Optimizer '{optimizer}' scored {score:.2f} on task profile '{task_profile}' (success={success})",
+                user_id="self_evolve_engine",
+                metadata={
+                    "task_profile": task_profile,
+                    "optimizer": optimizer,
+                    "score": score,
+                    "success": success,
+                },
+            )
+        except Exception as err:  # noqa: BLE001 - telemetry must never fail a compile
+            _log.warning(
+                "self_evolve_memory_lesson_skipped",
+                error=str(err),
+                task_profile=task_profile,
+            )
 
         return {
             "morphology": self.morphology.best_pattern(task_profile),
@@ -691,11 +700,15 @@ class SelfEvolveEngine:
         from dspytools.memory.manager import get_memory_manager
 
         memory = get_memory_manager()
-        results = memory.search(
-            query=f"best optimizer for {task_profile}",
-            user_id="self_evolve_engine",
-            limit=3,
-        )
+        try:
+            results = memory.search(
+                query=f"best optimizer for {task_profile}",
+                user_id="self_evolve_engine",
+                limit=3,
+            )
+        except Exception as err:  # noqa: BLE001 - memory is an optional prior
+            _log.warning("self_evolve_memory_lookup_skipped", error=str(err))
+            results = []
         for result in results:
             content = result.get("content", "")
             if "Optimizer '" in content and "scored" in content:

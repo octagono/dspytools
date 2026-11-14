@@ -123,13 +123,13 @@ This doc owns all files directly in `src/dspytools/core/` and their contracts. T
 ### `mlflow_tracker.py` — MLflow experiment tracking
 
 - `MLflowTracker` wraps MLflow (v3.5.1+) for dspytools experiment tracking, tracing, and feedback logging.
-- **Lazy initialization**: `_ensure_initialized()` called on first use. Falls back to local file store (`~/.config/dspytools/mlruns/`) if MLflow server is unavailable.
-- **`trace(name)`** — context manager for MLflow autologging a compile operation. Wraps code in `start_run`/`end_run`.
-- **`log_compile(optimizer, module, score, params, metrics)`** — logs optimizer name, module name, quality score, and extra params/metrics to a dedicated MLflow run. Returns `run_id`. Raises on MLflow failure (fail-fast).
-- **`log_gfl_comparison(pipeline_result)`** — logs GFL 4-way comparison results including best optimizer, baseline, improvement, and per-optimizer scores. Raises on MLflow failure (fail-fast).
-- **`log_feedback(trace_id, name, value, rationale)`** — logs evaluation feedback for a trace via `mlflow.log_feedback()`. Raises on MLflow failure (fail-fast).
+- **Lazy initialization**: `_ensure_initialized()` called on first use. Uses `MLFLOW_TRACKING_URI` when set, otherwise the local sqlite store (`~/.config/dspytools/mlruns/mlflow.db`) — never a dead remote default.
+- **`trace(name)`** — context manager for MLflow autologging a compile operation. Wraps code in `start_run`/`end_run`. Yields `None` when the tracker is disabled.
+- **`log_compile(optimizer, module, score, params, metrics)`** — logs optimizer name, module name, quality score, and extra params/metrics to a dedicated MLflow run. Returns `run_id`, or `None` when tracking is disabled.
+- **`log_gfl_comparison(pipeline_result)`** — logs GFL 4-way comparison results including best optimizer, baseline, improvement, and per-optimizer scores. Returns `None` when tracking is disabled.
+- **`log_feedback(trace_id, name, value, rationale)`** — logs evaluation feedback for a trace via `mlflow.log_feedback()`. Returns `None` when tracking is disabled.
 - **Singleton access**: `get_tracker(async_mode=True)` returns a global `MLflowTracker` or `MLflowAsyncTracker` instance. Defaults to async mode.
-- **Fail-fast**: All public methods propagate MLflow exceptions rather than silently swallowing them. Only retains `try/except` for: the recovery pattern in `_ensure_initialized` (get → create experiment), and control-flow exceptions (`queue.Empty`, `queue.Full`) in the async worker.
+- **Degrade, never block**: tracking is telemetry. The HTTP client is pinned (`MLFLOW_HTTP_REQUEST_TIMEOUT`, `MLFLOW_HTTP_REQUEST_MAX_RETRIES`, `MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR`) before the first call; if the store is unreachable, `_ensure_initialized` logs one `mlflow_unavailable` warning, sets `_disabled`, and every public method becomes a no-op for the rest of the process. `DSPYTOOLS_MLFLOW=0` disables it outright. The only surviving `try/except` besides this is the get → create-experiment recovery and the async worker's `queue.Empty`/`queue.Full` control flow.
 
 ### `mlflow_tracker.py` — `MLflowAsyncTracker`
 

@@ -137,7 +137,7 @@ Root governs the dspytools project — DSPy 3.5.0 examples running on Qwen3.5-9B
 ## Quick Commands
 
 ```bash
-pytest tests/ -q              # 557 hermetic tests, ~9s (DummyLM only; 20 Redis/FalkorDB failures when no container is up)
+pytest tests/ -q              # 577 hermetic tests, ~85s (DummyLM only; graph tests need `docker compose -f docker-compose.redis.yml up -d`)
 ruff check                     # zero errors required
 dspytools --help               # explore all 24 commands
 dspytools self auto-fix         # inspect and fix drift-degraded programs

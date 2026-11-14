@@ -76,6 +76,30 @@ def _isolate_dspytools_dirs(tmp_path: Path) -> Generator[None, None, None]:
     _inv_idx()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_mlflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Generator[None, None, None]:
+    """Keep the suite off whatever MLflow the developer has exported.
+
+    A dead ``MLFLOW_TRACKING_URI`` (the old default was ``http://localhost:5000``)
+    made every ``MLflowTracker`` init block in urllib3 backoff — roughly 100 s per
+    call. Tests get a throwaway sqlite store, no retries, and a fresh singleton.
+    """
+    from dspytools.core import mlflow_tracker as _mlflow_tracker
+
+    db_path = tmp_path / "mlflow" / "mlflow.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{db_path}")
+    monkeypatch.setenv("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "0")
+    monkeypatch.setenv("MLFLOW_HTTP_REQUEST_TIMEOUT", "1")
+    monkeypatch.setattr(_mlflow_tracker, "_tracker", None)
+
+    yield
+
+    monkeypatch.setattr(_mlflow_tracker, "_tracker", None)
+
+
 # ── Shared mock fixtures ──────────────────────────────────────────────
 
 

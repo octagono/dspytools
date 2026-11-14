@@ -320,7 +320,16 @@ def skill_graph_path() -> Path:
 
 
 def mlflow_tracking_uri() -> str:
-    return os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000")
+    """Tracking URI for MLflow.
+
+    Defaults to the local sqlite store the tracker writes by itself, never to
+    a dead ``http://localhost:5000`` — pointing at a server that is not running
+    used to block every tracker init behind urllib3 backoff.
+    """
+    env = os.environ.get("MLFLOW_TRACKING_URI")
+    if env:
+        return env
+    return f"sqlite:///{config_dir() / 'mlruns' / 'mlflow.db'}"
 
 
 def mlflow_experiment_name() -> str:

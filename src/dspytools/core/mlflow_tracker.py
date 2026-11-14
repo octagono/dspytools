@@ -17,6 +17,22 @@ from typing import Any
 import mlflow
 
 from dspytools.config.settings import config_dir as _config_dir
+from dspytools.core.logging_config import get_logger
+
+_log = get_logger(__name__)
+
+# MLflow's HTTP client otherwise retries with exponential backoff for ~100 s
+# against an unreachable tracking server, which blocks compiles and tests.
+# Cap it so an unreachable backend degrades in seconds instead.
+_HTTP_TIMEOUT = 2
+_HTTP_MAX_RETRIES = 1
+_HTTP_BACKOFF_FACTOR = 1
+_FALSY = {"0", "false", "no", "off"}
+
+
+def _disabled_by_env() -> bool:
+    """Return True when ``DSPYTOOLS_MLFLOW`` explicitly disables tracking."""
+    return os.environ.get("DSPYTOOLS_MLFLOW", "").strip().lower() in _FALSY
 
 
 class MLflowTracker:
@@ -44,6 +60,9 @@ class MLflowTracker:
         self.experiment_name = experiment_name
         self._mlflow = None
         self._initialized = False
+        # Tracking is best-effort: an unreachable backend disables the tracker
+        # for the rest of the process instead of raising on every call.
+        self._disabled = _disabled_by_env()
 
     @property
     def mlflow(self):
@@ -53,35 +72,59 @@ class MLflowTracker:
         return self._mlflow
 
     def _ensure_initialized(self):
-        """Initialize MLflow tracking with sqlite:/// backend.
+        """Initialize MLflow tracking, degrading to a no-op when unreachable.
 
         Uses sqlite:/// for local tracking (file:// is deprecated in MLflow v3).
-        Remote tracking (e.g. MLflow server) is handled via MLFLOW_TRACKING_URI env var.
+        Remote tracking (e.g. MLflow server) is handled via MLFLOW_TRACKING_URI.
+
+        Tracking is telemetry: a dead tracking server must not fail a compile
+        or stall a test run, so the HTTP client is capped and an unreachable
+        backend disables the tracker for the rest of the process.
         """
-        if self._initialized:
+        if self._initialized or self._disabled:
             return
 
-        if self.tracking_uri:
-            self.mlflow.set_tracking_uri(self.tracking_uri)
-        else:
-            db_path = str(_config_dir() / "mlruns" / "mlflow.db")
-            os.makedirs(os.path.dirname(db_path), exist_ok=True)
-            self.mlflow.set_tracking_uri(f"sqlite:///{db_path}")
-
-        # Create or get experiment — only catch "not found", re-raise everything else
-        from mlflow.exceptions import MlflowException
+        os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", str(_HTTP_TIMEOUT))
+        os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", str(_HTTP_MAX_RETRIES))
+        os.environ.setdefault(
+            "MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR", str(_HTTP_BACKOFF_FACTOR)
+        )
 
         try:
-            self.mlflow.get_experiment_by_name(self.experiment_name)
-        except MlflowException:
-            self.mlflow.create_experiment(self.experiment_name)
+            if self.tracking_uri:
+                self.mlflow.set_tracking_uri(self.tracking_uri)
+            else:
+                db_path = str(_config_dir() / "mlruns" / "mlflow.db")
+                os.makedirs(os.path.dirname(db_path), exist_ok=True)
+                self.mlflow.set_tracking_uri(f"sqlite:///{db_path}")
 
-        # Enable DSPy autologging — auto-traces every dspy.Module, dspy.ReAct,
-        # dspy.ChainOfThought, dspy.Predict, dspy.Tool, and LM call project-wide.
-        # Uses importlib because mlflow.dspy is a dynamic plugin not statically resolvable.
-        self._enable_dspy_autolog()
+            # Create or get experiment — a *missing* experiment is recoverable.
+            from mlflow.exceptions import MlflowException
+
+            try:
+                self.mlflow.get_experiment_by_name(self.experiment_name)
+            except MlflowException:
+                self.mlflow.create_experiment(self.experiment_name)
+
+            # Enable DSPy autologging — auto-traces every dspy.Module,
+            # dspy.ReAct, dspy.ChainOfThought, dspy.Predict, dspy.Tool, and LM
+            # call project-wide.  Uses importlib because mlflow.dspy is a
+            # dynamic plugin not statically resolvable.
+            self._enable_dspy_autolog()
+        except Exception as err:  # noqa: BLE001 - telemetry must not break work
+            self._disabled = True
+            _log.warning(
+                "mlflow_unavailable",
+                tracking_uri=self.tracking_uri or "local sqlite",
+                error=str(err),
+            )
 
         self._initialized = True
+
+    @property
+    def disabled(self) -> bool:
+        """True when tracking is off (opted out or the backend is unreachable)."""
+        return self._disabled
 
     @contextmanager
     def trace(self, name: str):
@@ -92,6 +135,9 @@ class MLflowTracker:
                 compiled = optimizer.compile(...)
         """
         self._ensure_initialized()
+        if self._disabled:
+            yield None
+            return
         run = self.mlflow.start_run(run_name=name)
         try:
             yield run
@@ -137,10 +183,13 @@ class MLflowTracker:
         Returns:
             run_id
 
-        Raises:
-            Exception: Propagates any MLflow errors (fail-fast).
+        Tracking is best-effort: when the backend is unreachable the tracker
+        degrades to a no-op for the rest of the process (one ``mlflow_unavailable``
+        warning at initialisation) instead of propagating per call.
         """
         self._ensure_initialized()
+        if self._disabled:
+            return None
         self.mlflow.set_experiment(self.experiment_name)
 
         with self.mlflow.start_run(run_name=f"{optimizer}_{module}") as run:
@@ -168,10 +217,13 @@ class MLflowTracker:
         Returns:
             run_id
 
-        Raises:
-            Exception: Propagates any MLflow errors (fail-fast).
+        Tracking is best-effort: when the backend is unreachable the tracker
+        degrades to a no-op for the rest of the process (one ``mlflow_unavailable``
+        warning at initialisation) instead of propagating per call.
         """
         self._ensure_initialized()
+        if self._disabled:
+            return None
 
         with self.mlflow.start_run(run_name="gfl_comparison") as run:
             self.mlflow.log_param(
@@ -201,10 +253,13 @@ class MLflowTracker:
             value: Numeric score
             rationale: Explanation
 
-        Raises:
-            Exception: Propagates any MLflow errors (fail-fast).
+        Tracking is best-effort: when the backend is unreachable the tracker
+        degrades to a no-op for the rest of the process (one ``mlflow_unavailable``
+        warning at initialisation) instead of propagating per call.
         """
         self._ensure_initialized()
+        if self._disabled:
+            return None
         self.mlflow.log_feedback(
             trace_id=trace_id,
             name=name,

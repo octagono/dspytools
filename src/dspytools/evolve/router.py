@@ -10,7 +10,6 @@ Has access to all dspytools features as tools:
 from __future__ import annotations
 
 import json as _json
-import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -22,8 +21,11 @@ import mlflow
 from mlflow.tracing.fluent import trace as mlflow_trace
 
 from dspytools.core.hotswap import HotSwapManager
+from dspytools.core.logging_config import get_logger
 from dspytools.core.setup import setup_dspy
 from dspytools.evolve.metrics import auto_metric
+
+_log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # MLflow Tracing setup — configure tracking URI + experiment once
@@ -42,14 +44,25 @@ def setup_agent_tracing() -> None:
     if _TRACING_INITIALIZED:
         return
 
-    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000")
-    experiment_name = os.environ.get("MLFLOW_EXPERIMENT_NAME", "dspytools")
+    from dspytools.config.settings import mlflow_experiment_name, mlflow_tracking_uri
 
-    mlflow.set_tracking_uri(tracking_uri)
-    experiment = mlflow.get_experiment_by_name(experiment_name)
-    if experiment is None:
-        mlflow.create_experiment(experiment_name)
-    mlflow.set_experiment(experiment_name)
+    tracking_uri = mlflow_tracking_uri()
+    experiment_name = mlflow_experiment_name()
+
+    # Tracing is best-effort: an unreachable backend must not block or break
+    # the agent. One warning, then tracing stays off for the process.
+    try:
+        mlflow.set_tracking_uri(tracking_uri)
+        experiment = mlflow.get_experiment_by_name(experiment_name)
+        if experiment is None:
+            mlflow.create_experiment(experiment_name)
+        mlflow.set_experiment(experiment_name)
+    except Exception as err:  # noqa: BLE001 - telemetry must not break work
+        _log.warning(
+            "mlflow_tracing_unavailable", tracking_uri=tracking_uri, error=str(err)
+        )
+        _TRACING_INITIALIZED = True
+        return
 
     # Enable DSPy autologging — auto-traces every dspy.Module, dspy.ReAct,
     # dspy.ChainOfThought, dspy.Predict, dspy.Tool, and LM call project-wide.
